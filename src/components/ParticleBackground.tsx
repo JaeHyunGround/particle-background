@@ -1,12 +1,14 @@
+import { useRef, useEffect } from "react";
 import { Canvas } from "@react-three/fiber";
-import { ParticleSphere } from "./ParticleSphere";
+import * as THREE from "three";
+import { ParticleSphere, type PointerState } from "./ParticleSphere";
 
 /**
  * ParticleBackground — 외부 노출 컴포넌트 (역할 기반 네이밍)
  *
  * 풀스크린 검정 배경 뒤에 깔리는 파티클 구체. 비주얼은 전부 WebGL 셰이더가
- * 그리므로 여기서는 캔버스를 화면 뒤에 배치하는 일만 한다(인라인 style).
- * 내부 구현은 ParticleSphere에 위임.
+ * 그리므로 여기서는 캔버스를 화면 뒤에 배치하고, 포인터 좌표만 수집해
+ * 내부 구현(ParticleSphere)에 넘긴다.
  */
 
 // 튜닝 파라미터 (props로 노출, 기본값) — 의미는 ParticleSphereProps 주석 참고
@@ -18,10 +20,13 @@ export interface ParticleBackgroundProps {
   flowSpeed?: number; // 흐름 속도
   pointSize?: number; // 점 크기
   sphericity?: number; // 구 형태 유지 정도 (1=완벽한 구, 0=자유 curl 구름)
+  mouseRadius?: number; // 마우스 반발 영향 반경 (이 반경 안 입자만 휘저어짐)
+  mousePush?: number; // 마우스 반발 세기 (입자를 바깥으로 밀어내는 양)
 }
 
 // 풀스크린 배경 래퍼 스타일.
-// pointer-events: none — 2단계에서 마우스 인터랙션 추가 시 제거(풀) 예정.
+// pointer-events: none 이어도 포인터는 window 리스너로 받으므로(아래 useEffect)
+// 실제 콘텐츠 위에 깔 때 클릭을 막지 않으면서도 마우스 인터랙션이 동작한다.
 const wrapperStyle: React.CSSProperties = {
   position: "fixed",
   inset: 0,
@@ -34,11 +39,49 @@ export function ParticleBackground({
   count = 300000,
   radius = 1.0,
   noiseFreq = 0.8,
-  noiseAmp = 0.3,
+  noiseAmp = 0.2,
   flowSpeed = 0.15,
   pointSize = 0.8,
   sphericity = 1.0, // 기본: 완벽한 구 실루엣 유지
+  mouseRadius = 1.0,
+  mousePush = 0.5,
 }: ParticleBackgroundProps) {
+  // 포인터 상태(좌표/활성)를 ref로 공유 — window 리스너가 쓰고 useFrame이 읽는다.
+  // ref라서 값이 바뀌어도 리렌더가 발생하지 않아 매 프레임 갱신에 적합.
+  const pointer = useRef<PointerState>({
+    ndc: new THREE.Vector2(0, 0),
+    active: false,
+  });
+
+  // window 전역 포인터 리스너: 래퍼가 z-index:-1 / pointer-events:none 이어도
+  // 마우스 좌표를 확실히 받기 위해 window에 직접 건다. (좌표 저장만, 연산은 셰이더)
+  useEffect(() => {
+    const onMove = (e: PointerEvent) => {
+      // 화면 좌표 → NDC(-1~1). y는 위가 +가 되도록 뒤집는다.
+      pointer.current.ndc.set(
+        (e.clientX / window.innerWidth) * 2 - 1,
+        -(e.clientY / window.innerHeight) * 2 + 1,
+      );
+      pointer.current.active = true;
+    };
+    // 포인터가 문서(브라우저 창) 밖으로 나가면 비활성 → 서서히 잔잔해짐
+    const onOut = (e: PointerEvent) => {
+      if (!e.relatedTarget) pointer.current.active = false;
+    };
+    const onBlur = () => {
+      pointer.current.active = false;
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerout", onOut);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerout", onOut);
+      window.removeEventListener("blur", onBlur);
+    };
+  }, []);
+
   return (
     <div style={wrapperStyle}>
       {/* dpr [1,2]: 레티나 품질 + 과도한 픽셀 부하 방지. 카메라 z≈3. */}
@@ -56,6 +99,9 @@ export function ParticleBackground({
           flowSpeed={flowSpeed}
           pointSize={pointSize}
           sphericity={sphericity}
+          mouseRadius={mouseRadius}
+          mousePush={mousePush}
+          pointer={pointer}
         />
       </Canvas>
     </div>

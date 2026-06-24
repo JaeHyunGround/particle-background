@@ -1,4 +1,9 @@
-import { useMemo, useRef, useLayoutEffect } from "react";
+import {
+  useMemo,
+  useRef,
+  useLayoutEffect,
+  type MutableRefObject,
+} from "react";
 import {
   useFrame,
   useThree,
@@ -17,6 +22,12 @@ import * as THREE from "three";
  * CPU(JS)에서 입자별 루프는 돌지 않는다 — 기준 위치(aBase)만 마운트 시 1회 생성.
  */
 
+// 포인터 상태: window 리스너(ParticleBackground)가 쓰고 useFrame이 읽는 공유 ref.
+export interface PointerState {
+  ndc: THREE.Vector2; // 현재 포인터 NDC 좌표(-1~1)
+  active: boolean; // 포인터가 브라우저 창 안에 있는지 (호버 = 반응)
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Props (튜닝 파라미터). 모두 ParticleBackground에서 기본값과 함께 내려온다.
 // ────────────────────────────────────────────────────────────────────────────
@@ -28,6 +39,9 @@ export interface ParticleSphereProps {
   flowSpeed: number; // 시간에 따른 흐름 속도
   pointSize: number; // 점 기본 크기 (원근 감쇠 적용 전)
   sphericity: number; // 구 형태 유지 정도 (1=완벽한 구, 0=자유 curl 구름)
+  mouseRadius: number; // 마우스 반발 영향 반경
+  mousePush: number; // 마우스 반발 세기
+  pointer: MutableRefObject<PointerState>; // 공유 포인터 상태 ref
   introDuration?: number; // 등장 연출 길이(초). 기본 1.5
 }
 
@@ -154,9 +168,11 @@ const vertexShader = /* glsl */ `
   uniform float uPixelRatio;  // 디바이스 픽셀 비율 (gl_PointSize 보정용)
   uniform float uSphericity;  // 구 형태 유지 정도 (1=완벽한 구, 0=자유 curl 구름)
 
-  // ── 2단계(마우스 인터랙션)용 유니폼: 선언만, 이번 단계엔 미사용 ──
-  uniform vec3  uMouse;          // 마우스 월드 좌표
-  uniform float uMouseStrength;  // 마우스 영향 강도 (이번 단계 0 고정)
+  // ── 2단계: 마우스 인터랙션 유니폼 ──
+  uniform vec3  uMouse;          // 마우스 월드 좌표 (useFrame에서 raycast+lerp로 추적)
+  uniform float uMouseStrength;  // 마우스 영향 강도 0~1 (움직이면↑, 멈추면 0으로 감쇠)
+  uniform float uMouseRadius;    // 반발 영향 반경 (이 반경 안의 입자만 휘저어짐)
+  uniform float uMousePush;      // 반발 세기 (입자를 바깥으로 밀어내는 양)
 
   attribute vec3 aBase;       // 각 입자의 기준 위치 (피보나치 구 분포)
 
@@ -164,9 +180,12 @@ const vertexShader = /* glsl */ `
   ${glslCurlNoise}
 
   void main(){
-    // curl noise 흐름에 따른 변위
+    // curl noise 흐름에 따른 변위 (상시 ambient). 마우스가 움직이면 uMouseStrength로
+    // 전역 난류(흐름 진폭)를 살짝 키운다 — 작은 가중치(MOUSE_TURBULENCE). 멈추면 1.0.
+    const float MOUSE_TURBULENCE = 0.1;
+    float turbo = 1.0 + uMouseStrength * MOUSE_TURBULENCE;
     vec3 flow = curlNoise(aBase * uNoiseFreq + uTime * uFlowSpeed);
-    vec3 displaced = aBase + flow * uNoiseAmp;
+    vec3 displaced = aBase + flow * uNoiseAmp * turbo;
 
     // 구 형태 유지: 변위된 위치를 다시 구 표면(원래 반지름)으로 투영한다.
     // 이렇게 하면 curl 변위의 '반지름 방향(바깥으로 튀는)' 성분이 제거되고
@@ -177,9 +196,15 @@ const vertexShader = /* glsl */ `
     vec3 onSphere = normalize(displaced) * baseRadius;
     displaced = mix(displaced, onSphere, uSphericity);
 
-    // 2단계용 마우스 변위 자리. uMouseStrength=0 이므로 결과에 영향 없음.
-    // (다음 단계에서 uMouse/uMouseStrength 값만 채우면 바로 동작)
-    displaced += (uMouse - aBase) * uMouseStrength * 0.0;
+    // 마우스 반발: 커서(uMouse) 주변 입자를 바깥으로 밀어낸다.
+    // 이 <points>는 모델 변환이 없어 object=world → displaced를 월드 위치로 사용.
+    // (구 표면 재투영 '이후'에 더해야 입자가 구 밖으로 휘저어지는 게 보인다)
+    vec3 toMouse = displaced - uMouse;
+    float mDist = length(toMouse);
+    float falloff = smoothstep(uMouseRadius, 0.0, mDist); // 반경 안에서만 1→0
+    // mDist=0 근처 normalize NaN 방지(epsilon)
+    vec3 push = (toMouse / max(mDist, 1e-4)) * falloff * uMousePush * uMouseStrength;
+    displaced += push;
 
     vec4 mvPosition = modelViewMatrix * vec4(displaced, 1.0);
     gl_Position = projectionMatrix * mvPosition;
@@ -223,8 +248,10 @@ const ParticleSphereMaterial = shaderMaterial(
     uPixelRatio: 1, // 컴포넌트 마운트 시 실제 렌더러 DPR로 갱신
     uSphericity: 1, // 구 형태 유지 정도 (1=완벽한 구)
     uOpacity: 0, // 페이드인 시작값 0
-    uMouse: new THREE.Vector3(0, 0, 0), // 2단계용 (미사용)
-    uMouseStrength: 0, // 2단계용 (0 고정)
+    uMouse: new THREE.Vector3(0, 0, 0), // 마우스 월드 좌표 (매 프레임 추적)
+    uMouseStrength: 0, // 마우스 영향 강도 0~1 (움직이면↑, 멈추면 0)
+    uMouseRadius: 1.0, // 반발 영향 반경 (커서 주변 dent 크기)
+    uMousePush: 0.5, // 반발 세기 (커서 위치를 움푹 패이게)
   },
   vertexShader,
   fragmentShader,
@@ -256,6 +283,9 @@ export function ParticleSphere({
   flowSpeed,
   pointSize,
   sphericity,
+  mouseRadius,
+  mousePush,
+  pointer,
   introDuration = 1.5, // 등장 연출 길이(초)
 }: ParticleSphereProps) {
   const materialRef = useRef<
@@ -266,28 +296,72 @@ export function ParticleSphere({
 
   // 실제 렌더러의 DPR (gl_PointSize 보정용)
   const pixelRatio = useThree((s) => s.gl.getPixelRatio());
+  // 마우스 raycast에 필요한 카메라
+  const camera = useThree((s) => s.camera);
 
-  // aBase: 피보나치 구 분포로 구 표면에 균등 분포한 기준 위치 (마운트 시 1회)
+  // 마우스 좌표 계산용 재사용 객체(매 프레임 new 방지)
+  const ray = useMemo(() => new THREE.Raycaster(), []);
+  const plane = useMemo(() => new THREE.Plane(), []);
+  const planeNormal = useMemo(() => new THREE.Vector3(), []);
+  const hitPoint = useMemo(() => new THREE.Vector3(), []);
+  const ORIGIN = useMemo(() => new THREE.Vector3(0, 0, 0), []); // 구 중심
+
+  // aBase: 피보나치 구 분포로 구 표면에 균등 분포한 기준 위치 (마운트 시 1회).
+  //
+  // ── [질감 토글] JITTER_RATIO ─────────────────────────────────────────────
+  //   0.0  → 완벽한 나선 격자 그대로. curl 변위 시 또렷한 sheet/결 질감(이전 버전).
+  //          ※ 현재 선택: 사용자가 이 질감을 선호.
+  //   0.04 → 각 입자에 작은 랜덤 지터를 더해 격자를 흐트러뜨림 → 부드러운 먼지
+  //          (dusty) 그레인. 빗살(moiré)은 사라지지만 결이 뭉개진다.
+  //   ※ '먼지 느낌'으로 되돌리려면 아래 값을 0.04 로 바꾸면 된다.
+  const JITTER_RATIO = 0.0;
   const positions = useMemo(() => {
     const arr = new Float32Array(count * 3);
     const golden = Math.PI * (3 - Math.sqrt(5)); // 황금각
+    const jitter = JITTER_RATIO * radius; // 0이면 지터 없음(격자 그대로)
     for (let i = 0; i < count; i++) {
       const y = 1 - (i / (count - 1)) * 2; // y: 1 → -1
       const r = Math.sqrt(1 - y * y); // 해당 y에서의 반지름
       const theta = golden * i;
       const x = Math.cos(theta) * r;
       const z = Math.sin(theta) * r;
-      arr[i * 3 + 0] = x * radius;
-      arr[i * 3 + 1] = y * radius;
-      arr[i * 3 + 2] = z * radius;
+      arr[i * 3 + 0] = x * radius + (Math.random() - 0.5) * jitter;
+      arr[i * 3 + 1] = y * radius + (Math.random() - 0.5) * jitter;
+      arr[i * 3 + 2] = z * radius + (Math.random() - 0.5) * jitter;
     }
     return arr;
   }, [count, radius]);
 
-  // 매 프레임 시간 누적 → 흐름 필드 전진
+  // 매 프레임: 시간 누적(상시 흐름) + 마우스 추적/세기 갱신
   useFrame((_, delta) => {
     const mat = materialRef.current;
-    if (mat) mat.uniforms.uTime.value += delta;
+    if (!mat) return;
+
+    // 1) 상시 흐름(ambient) — 마우스와 무관하게 항상 전진
+    mat.uniforms.uTime.value += delta;
+
+    const ps = pointer.current;
+
+    // 2) uMouse 추적: NDC → '구 중심을 지나고 카메라를 향하는 평면'으로 raycast
+    //    → 얻은 3D 좌표로 uMouse를 lerp(0.1)해 관성 있게 따라가게 한다.
+    camera.getWorldDirection(planeNormal); // 카메라가 바라보는 방향(평면 법선)
+    plane.setFromNormalAndCoplanarPoint(planeNormal, ORIGIN);
+    ray.setFromCamera(ps.ndc, camera);
+    const uMouse = mat.uniforms.uMouse.value as THREE.Vector3;
+    if (ray.ray.intersectPlane(plane, hitPoint)) {
+      // 프레임레이트 무관 추적: 초당 수렴속도(6)를 delta로 환산
+      uMouse.lerp(hitPoint, 1 - Math.exp(-6 * delta));
+    }
+
+    // 3) uMouseStrength: 호버(active) 중이면 1로 램프업, 창 밖으로 나가면 0으로
+    //    감쇠. 들어올 때는 빠르게(rate 8), 나갈 때는 천천히(rate 3) 수렴해서
+    //    마우스를 올려두면 강하게 반응하고, 빼면 ~1.5초에 걸쳐 잔잔해진다.
+    //    delta 기반이라 프레임레이트가 달라도 체감 속도가 동일하다.
+    const target = ps.active ? 1 : 0;
+    const rate = ps.active ? 8 : 3; // 초당 수렴 속도
+    const k = 1 - Math.exp(-rate * delta);
+    const cur = mat.uniforms.uMouseStrength.value as number;
+    mat.uniforms.uMouseStrength.value = THREE.MathUtils.lerp(cur, target, k);
   });
 
   // GSAP 등장 타임라인: uNoiseAmp 0→목표, uOpacity 0→1.
@@ -302,6 +376,8 @@ export function ParticleSphere({
     mat.uniforms.uPointSize.value = pointSize;
     mat.uniforms.uPixelRatio.value = pixelRatio;
     mat.uniforms.uSphericity.value = sphericity;
+    mat.uniforms.uMouseRadius.value = mouseRadius;
+    mat.uniforms.uMousePush.value = mousePush;
 
     const ctx = gsap.context(() => {
       const tl = gsap.timeline();
@@ -324,6 +400,8 @@ export function ParticleSphere({
     flowSpeed,
     pointSize,
     sphericity,
+    mouseRadius,
+    mousePush,
     introDuration,
     pixelRatio,
   ]);
