@@ -250,7 +250,7 @@ const ParticleSphereMaterial = shaderMaterial(
     uOpacity: 0, // 페이드인 시작값 0
     uMouse: new THREE.Vector3(0, 0, 0), // 마우스 월드 좌표 (매 프레임 추적)
     uMouseStrength: 0, // 마우스 영향 강도 0~1 (움직이면↑, 멈추면 0)
-    uMouseRadius: 1.0, // 반발 영향 반경 (커서 주변 dent 크기)
+    uMouseRadius: 0.7, // 반발 영향 반경 (커서 주변 dent 크기)
     uMousePush: 0.5, // 반발 세기 (커서 위치를 움푹 패이게)
   },
   vertexShader,
@@ -305,6 +305,7 @@ export function ParticleSphere({
   const planeNormal = useMemo(() => new THREE.Vector3(), []);
   const hitPoint = useMemo(() => new THREE.Vector3(), []);
   const ORIGIN = useMemo(() => new THREE.Vector3(0, 0, 0), []); // 구 중심
+  const mouseSphere = useMemo(() => new THREE.Sphere(), []); // raycast 대상 구
 
   // aBase: 피보나치 구 분포로 구 표면에 균등 분포한 기준 위치 (마운트 시 1회).
   //
@@ -342,15 +343,22 @@ export function ParticleSphere({
 
     const ps = pointer.current;
 
-    // 2) uMouse 추적: NDC → '구 중심을 지나고 카메라를 향하는 평면'으로 raycast
-    //    → 얻은 3D 좌표로 uMouse를 lerp(0.1)해 관성 있게 따라가게 한다.
-    camera.getWorldDirection(planeNormal); // 카메라가 바라보는 방향(평면 법선)
-    plane.setFromNormalAndCoplanarPoint(planeNormal, ORIGIN);
+    // 2) uMouse 추적: NDC → 3D 좌표. 먼저 '반지름 구 표면'에 raycast 한다.
+    //    커서를 구 표면점(앞면 껍질)으로 매핑해야, 화면 중앙(=구 중심 투영)에서도
+    //    앞면 입자가 커서와 가까워 반발 효과가 난다. (평면에 투영하면 중앙에서
+    //    커서가 구 중심에 놓여 모든 껍질 입자가 반경 밖이라 효과가 안 났음.)
+    //    구 실루엣 밖이면 구 중심 평면으로 폴백해 끊김 없이 이어준다.
     ray.setFromCamera(ps.ndc, camera);
     const uMouse = mat.uniforms.uMouse.value as THREE.Vector3;
-    if (ray.ray.intersectPlane(plane, hitPoint)) {
-      // 프레임레이트 무관 추적: 초당 수렴속도(6)를 delta로 환산
-      uMouse.lerp(hitPoint, 1 - Math.exp(-6 * delta));
+    const k = 1 - Math.exp(-6 * delta); // 프레임레이트 무관 추적 계수
+    mouseSphere.set(ORIGIN, radius);
+    if (ray.ray.intersectSphere(mouseSphere, hitPoint)) {
+      uMouse.lerp(hitPoint, k);
+    } else {
+      // 구 밖: 구 중심을 지나고 카메라를 향하는 평면으로 폴백
+      camera.getWorldDirection(planeNormal);
+      plane.setFromNormalAndCoplanarPoint(planeNormal, ORIGIN);
+      if (ray.ray.intersectPlane(plane, hitPoint)) uMouse.lerp(hitPoint, k);
     }
 
     // 3) uMouseStrength: 호버(active) 중이면 1로 램프업, 창 밖으로 나가면 0으로

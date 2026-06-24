@@ -39,7 +39,7 @@ import { ParticleBackground } from './components/ParticleBackground'
   flowSpeed={0.15}
   pointSize={0.8}    // 점 크기 (크면 milky하게 뭉침)
   sphericity={1.0}   // 1=완벽한 구 실루엣 / 0=자유 curl 구름
-  mouseRadius={1.0}  // 마우스 dent 크기(영향 반경)
+  mouseRadius={0.7}  // 마우스 dent 크기(영향 반경)
   mousePush={0.5}    // 마우스 dent 깊이(반발 세기)
 />
 ```
@@ -48,8 +48,9 @@ import { ParticleBackground } from './components/ParticleBackground'
 
 - **GPU 전용 변위**: vertex shader에서 3D simplex noise → curl noise(유한차분)
   계산. CPU 입자 루프 없음. 기준 위치 `aBase`만 피보나치 구 분포로 1회 생성.
-  완벽한 나선 격자는 변위 시 빗살(moiré)을 만들므로 각 입자에 작은 랜덤
-  지터(`0.04*radius`)를 더해 부드러운 먼지(dusty) 그레인으로 만든다.
+  입자 질감은 `ParticleSphere.tsx`의 `JITTER_RATIO` 상수로 토글한다 —
+  `0.0`(현재)이면 또렷한 sheet/결, `0.04`면 격자를 흐트러 부드러운 먼지(dusty)
+  그레인으로 바뀐다.
 - **렌더링**: `THREE.Points` + AdditiveBlending, `depthWrite/Test=false`,
   `frustumCulled=false`. fragment에서 `gl_PointCoord` radial smoothstep으로 부드러운 점.
 - **등장 연출**: GSAP 타임라인으로 `uNoiseAmp` 0→목표, `uOpacity` 0→1 (~1.5초).

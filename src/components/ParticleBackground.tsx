@@ -43,7 +43,7 @@ export function ParticleBackground({
   flowSpeed = 0.15,
   pointSize = 0.8,
   sphericity = 1.0, // 기본: 완벽한 구 실루엣 유지
-  mouseRadius = 1.0,
+  mouseRadius = 0.7,
   mousePush = 0.5,
 }: ParticleBackgroundProps) {
   // 포인터 상태(좌표/활성)를 ref로 공유 — window 리스너가 쓰고 useFrame이 읽는다.
