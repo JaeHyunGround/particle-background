@@ -1,4 +1,10 @@
-import { useMemo, useRef, useLayoutEffect, type MutableRefObject } from "react";
+import {
+  useMemo,
+  useRef,
+  useEffect,
+  useLayoutEffect,
+  type MutableRefObject,
+} from "react";
 import {
   useFrame,
   useThree,
@@ -37,6 +43,7 @@ export interface ParticleSphereProps {
   mouseRadius: number; // 마우스 반발 영향 반경
   mousePush: number; // 마우스 반발 세기
   pointer: MutableRefObject<PointerState>; // 공유 포인터 상태 ref
+  fps?: number; // 렌더 프레임 상한 (설정 시 demand 모드에서 이 주기로 invalidate). 미설정=네이티브
   introDuration?: number; // 등장 연출 길이(초). 기본 1.5
 }
 
@@ -318,6 +325,7 @@ export function ParticleSphere({
   mouseRadius,
   mousePush,
   pointer,
+  fps,
   introDuration = 1.5, // 등장 연출 길이(초)
 }: ParticleSphereProps) {
   const materialRef = useRef<
@@ -330,6 +338,27 @@ export function ParticleSphere({
   const pixelRatio = useThree((s) => s.gl.getPixelRatio());
   // 뷰포트 크기 (종횡비 계산용 — 영향범위를 원형으로 보정)
   const size = useThree((s) => s.size);
+  // demand 모드에서 한 프레임 렌더를 요청하는 함수
+  const invalidate = useThree((s) => s.invalidate);
+
+  // 프레임 상한(fps): Canvas가 frameloop="demand"라 invalidate 할 때만 렌더된다.
+  // 가벼운 rAF 루프(60Hz)에서 fps 주기로만 invalidate → 120Hz 화면이어도 실제
+  // GPU 렌더는 fps로 제한돼 부하·발열이 절반(또는 그 이하)으로 떨어진다.
+  useEffect(() => {
+    if (fps == null) return; // 미설정: always 모드(네이티브)라 직접 invalidate 불필요
+    let raf = 0;
+    let last = 0;
+    const interval = 1000 / fps;
+    const loop = (t: number) => {
+      raf = requestAnimationFrame(loop);
+      if (t - last >= interval) {
+        last = t;
+        invalidate(); // 한 프레임 렌더 요청 (frameloop="never"면 무시됨 = 정지 유지)
+      }
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [fps, invalidate]);
 
   // 부드럽게 추적하는 마우스 NDC (매 프레임 pointer 쪽으로 lerp)
   const smoothMouse = useMemo(() => new THREE.Vector2(0, 0), []);

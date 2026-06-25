@@ -57,6 +57,7 @@ export interface ParticleBackgroundProps {
   sphericity?: number; // 구 형태 유지 정도 (1=완벽한 구, 0=자유 curl 구름)
   mouseRadius?: number; // 마우스 반발 영향 반경 (이 반경 안 입자만 휘저어짐)
   mousePush?: number; // 마우스 반발 세기 (입자를 바깥으로 밀어내는 양)
+  fps?: number; // 렌더 프레임 상한. 미설정=네이티브 최대(120Hz면 120). 발열 줄이려면 60/30 지정
 }
 
 // 풀스크린 배경 래퍼 스타일.
@@ -80,6 +81,7 @@ export function ParticleBackground({
   sphericity = 1.0, // 기본: 완벽한 구 실루엣 유지
   mouseRadius = 0.3,
   mousePush = 0.4,
+  fps, // 미설정=네이티브 최대 프레임(최상 품질). 줄이려면 60/30 등 지정
 }: ParticleBackgroundProps) {
   // 포인터 상태(좌표/활성)를 ref로 공유 — window 리스너가 쓰고 useFrame이 읽는다.
   // ref라서 값이 바뀌어도 리렌더가 발생하지 않아 매 프레임 갱신에 적합.
@@ -148,11 +150,12 @@ export function ParticleBackground({
     <div style={wrapperStyle}>
       {/* dpr 상한: 데스크탑 1.5, 모바일 1 (약한 GPU 부하↓). 픽셀=fragment/오버드로우
           비용이라 발열에 직결. 품질 손실은 거의 없음. 카메라 z≈3. */}
-      {/* frameloop: 활성 시 always(네이티브 최대 프레임), 비활성(탭 숨김/창 blur) 시
-          never로 완전 정지(GPU 작업 0). */}
+      {/* frameloop: 활성 시 — fps 미설정이면 always(네이티브 최대 프레임=최상 품질),
+          fps 설정이면 demand(ParticleSphere가 그 상한으로 invalidate).
+          비활성(탭 숨김/창 blur) 시 never로 완전 정지. */}
       <Canvas
         dpr={[1, maxDpr]}
-        frameloop={active ? "always" : "never"}
+        frameloop={active ? (fps != null ? "demand" : "always") : "never"}
         camera={{ position: [0, 0, 3], fov: 50 }}
         gl={{ antialias: true }}
       >
@@ -169,6 +172,7 @@ export function ParticleBackground({
           sphericity={sphericity}
           mouseRadius={mouseRadius}
           mousePush={mousePush}
+          fps={fps}
           pointer={pointer}
         />
       </Canvas>
