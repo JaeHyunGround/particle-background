@@ -162,6 +162,7 @@ const vertexShader = /* glsl */ `
   uniform float uPointSize;   // 점 기본 크기
   uniform float uPixelRatio;  // 디바이스 픽셀 비율 (gl_PointSize 보정용)
   uniform float uSphericity;  // 구 형태 유지 정도 (1=완벽한 구, 0=자유 curl 구름)
+  uniform float uIntro;       // 등장 연출: 0=중심 한 점 → 1=완전한 구 (부풀어오름)
 
   // ── 2단계: 마우스 인터랙션 유니폼 (화면 공간 게이팅) ──
   uniform vec2  uMouseScreen;    // 마우스 NDC 좌표(-1~1), useFrame에서 부드럽게 추적
@@ -191,6 +192,10 @@ const vertexShader = /* glsl */ `
     float baseRadius = length(aBase);
     vec3 onSphere = normalize(displaced) * baseRadius;
     displaced = mix(displaced, onSphere, uSphericity);
+
+    // 등장 연출: uIntro 0→1 동안 중심(원점)에서 최종 위치로 균일 스케일 →
+    // 구가 한 점에서 부풀어오르듯 등장한다. (GSAP가 ease와 함께 0→1로 트윈)
+    displaced *= uIntro;
 
     // 마우스 반발(화면 공간): 커서가 화면에서 '그 아래 있는' 입자를 옆으로 밀어
     // 구멍(void)을 만든다. 입자의 화면 위치(NDC)와 커서 NDC의 2D 거리로 게이팅
@@ -254,6 +259,7 @@ const ParticleSphereMaterial = shaderMaterial(
     uPointSize: 1.5,
     uPixelRatio: 1, // 컴포넌트 마운트 시 실제 렌더러 DPR로 갱신
     uSphericity: 1, // 구 형태 유지 정도 (1=완벽한 구)
+    uIntro: 0.1, // 등장 연출 시작값 0.1 (10% 크기) → GSAP가 1로 (부풀어오름)
     uOpacity: 0, // 페이드인 시작값 0
     uMouseScreen: new THREE.Vector2(0, 0), // 마우스 NDC (매 프레임 추적)
     uAspect: 1, // 뷰포트 종횡비 (컴포넌트에서 갱신)
@@ -363,7 +369,7 @@ export function ParticleSphere({
     mat.uniforms.uMouseStrength.value = THREE.MathUtils.lerp(cur, target, k);
   });
 
-  // GSAP 등장 타임라인: uNoiseAmp 0→목표, uOpacity 0→1.
+  // GSAP 등장 타임라인: uIntro 0→1(중심에서 부풀어오름) + uNoiseAmp 0→목표 + uOpacity 0→1.
   // useLayoutEffect로 첫 페인트 전에 시작값(0)을 보장.
   useLayoutEffect(() => {
     const mat = materialRef.current;
@@ -380,15 +386,23 @@ export function ParticleSphere({
 
     const ctx = gsap.context(() => {
       const tl = gsap.timeline();
-      tl.to(mat.uniforms.uNoiseAmp, {
-        value: noiseAmp,
-        duration: introDuration,
-        ease: "power2.out",
-      }).to(
-        mat.uniforms.uOpacity,
+      // uIntro: 10% 크기 → 100%. 오버슈트 없이 부드럽게 커진다(빡 뜨는 느낌 방지).
+      tl.fromTo(
+        mat.uniforms.uIntro,
+        { value: 0.1 },
         { value: 1, duration: introDuration, ease: "power2.out" },
-        0, // 동시에 시작
-      );
+        0,
+      )
+        .to(
+          mat.uniforms.uNoiseAmp,
+          { value: noiseAmp, duration: introDuration, ease: "power2.out" },
+          0,
+        )
+        .to(
+          mat.uniforms.uOpacity,
+          { value: 1, duration: introDuration, ease: "power2.out" },
+          0, // 동시에 시작
+        );
     });
 
     // 언마운트 시 GSAP 트윈/컨텍스트 정리
