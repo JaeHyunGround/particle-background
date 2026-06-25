@@ -1,4 +1,4 @@
-import { useRef, useEffect } from "react";
+import { useRef, useEffect, useState } from "react";
 import { Canvas } from "@react-three/fiber";
 import * as THREE from "three";
 import { ParticleSphere, type PointerState } from "./ParticleSphere";
@@ -82,12 +82,30 @@ export function ParticleBackground({
     };
   }, []);
 
+  // 탭이 숨겨지거나 창 포커스가 빠지면 렌더 루프를 멈춰 GPU 작업을 0으로 만든다.
+  // (안 보이는 동안 발열/배터리 절약 — 부작용 없는 가장 효과적인 최적화)
+  const [active, setActive] = useState(true);
+  useEffect(() => {
+    const update = () =>
+      setActive(document.visibilityState === "visible" && document.hasFocus());
+    update();
+    document.addEventListener("visibilitychange", update);
+    window.addEventListener("focus", update);
+    window.addEventListener("blur", update);
+    return () => {
+      document.removeEventListener("visibilitychange", update);
+      window.removeEventListener("focus", update);
+      window.removeEventListener("blur", update);
+    };
+  }, []);
+
   return (
     <div style={wrapperStyle}>
       {/* dpr 상한 1.5: 레티나에서 픽셀(=fragment/오버드로우) 부하를 줄여 발열 완화.
           품질 손실은 거의 없음. 더 선명하게/더 가볍게는 이 값으로 조절. 카메라 z≈3. */}
       <Canvas
         dpr={[1, 1.5]}
+        frameloop={active ? "always" : "never"}
         camera={{ position: [0, 0, 3], fov: 50 }}
         gl={{ antialias: true }}
       >

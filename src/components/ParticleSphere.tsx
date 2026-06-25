@@ -347,14 +347,17 @@ export function ParticleSphere({
     const mat = materialRef.current;
     if (!mat) return;
 
+    // 탭/포커스 복귀로 한 프레임 delta가 크게 튀어도 흐름이 점프하지 않게 클램프.
+    const dt = Math.min(delta, 1 / 30);
+
     // 1) 상시 흐름(ambient) — 마우스와 무관하게 항상 전진
-    mat.uniforms.uTime.value += delta;
+    mat.uniforms.uTime.value += dt;
 
     const ps = pointer.current;
 
     // 2) 마우스 화면 좌표 추적: 포인터 NDC를 향해 부드럽게 lerp(관성).
     //    프레임레이트 무관(초당 수렴속도 6을 delta로 환산). 종횡비도 매 프레임 갱신.
-    smoothMouse.lerp(ps.ndc, 1 - Math.exp(-6 * delta));
+    smoothMouse.lerp(ps.ndc, 1 - Math.exp(-6 * dt));
     (mat.uniforms.uMouseScreen.value as THREE.Vector2).copy(smoothMouse);
     mat.uniforms.uAspect.value = size.width / size.height;
 
@@ -364,7 +367,7 @@ export function ParticleSphere({
     //    delta 기반이라 프레임레이트가 달라도 체감 속도가 동일하다.
     const target = ps.active ? 1 : 0;
     const rate = ps.active ? 8 : 3; // 초당 수렴 속도
-    const k = 1 - Math.exp(-rate * delta);
+    const k = 1 - Math.exp(-rate * dt);
     const cur = mat.uniforms.uMouseStrength.value as number;
     mat.uniforms.uMouseStrength.value = THREE.MathUtils.lerp(cur, target, k);
   });
