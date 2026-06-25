@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState } from "react";
+import { useRef, useEffect, useState, useMemo } from "react";
 import { Canvas } from "@react-three/fiber";
 import * as THREE from "three";
 import { ParticleSphere, type PointerState } from "./ParticleSphere";
@@ -36,7 +36,7 @@ const wrapperStyle: React.CSSProperties = {
 };
 
 export function ParticleBackground({
-  count = 150000,
+  count,
   radius = 1.0,
   noiseFreq = 0.8,
   noiseAmp = 0.2,
@@ -53,9 +53,19 @@ export function ParticleBackground({
     active: false,
   });
 
+  // 터치(모바일/태블릿) 감지: hover가 없으므로 마우스 이펙트를 생략하고,
+  // 약한 GPU에 맞춰 입자 수와 DPR을 낮춘다. (count를 직접 넘기면 그 값을 우선)
+  const isTouch = useMemo(
+    () => window.matchMedia("(hover: none), (pointer: coarse)").matches,
+    [],
+  );
+  const resolvedCount = count ?? (isTouch ? 80000 : 150000);
+  const maxDpr = isTouch ? 1.25 : 1.5;
+
   // window 전역 포인터 리스너: 래퍼가 z-index:-1 / pointer-events:none 이어도
   // 마우스 좌표를 확실히 받기 위해 window에 직접 건다. (좌표 저장만, 연산은 셰이더)
   useEffect(() => {
+    if (isTouch) return; // 터치 기기: hover가 없으므로 마우스 이펙트 생략
     const onMove = (e: PointerEvent) => {
       // 화면 좌표 → NDC(-1~1). y는 위가 +가 되도록 뒤집는다.
       pointer.current.ndc.set(
@@ -80,7 +90,7 @@ export function ParticleBackground({
       window.removeEventListener("pointerout", onOut);
       window.removeEventListener("blur", onBlur);
     };
-  }, []);
+  }, [isTouch]);
 
   // 탭이 숨겨지거나 창 포커스가 빠지면 렌더 루프를 멈춰 GPU 작업을 0으로 만든다.
   // (안 보이는 동안 발열/배터리 절약 — 부작용 없는 가장 효과적인 최적화)
@@ -101,17 +111,17 @@ export function ParticleBackground({
 
   return (
     <div style={wrapperStyle}>
-      {/* dpr 상한 1.5: 레티나에서 픽셀(=fragment/오버드로우) 부하를 줄여 발열 완화.
-          품질 손실은 거의 없음. 더 선명하게/더 가볍게는 이 값으로 조절. 카메라 z≈3. */}
+      {/* dpr 상한: 데스크탑 1.5, 모바일 1 (약한 GPU 부하↓). 픽셀=fragment/오버드로우
+          비용이라 발열에 직결. 품질 손실은 거의 없음. 카메라 z≈3. */}
       <Canvas
-        dpr={[1, 1.5]}
+        dpr={[1, maxDpr]}
         frameloop={active ? "always" : "never"}
         camera={{ position: [0, 0, 3], fov: 50 }}
         gl={{ antialias: true }}
       >
         <color attach="background" args={["#000000"]} />
         <ParticleSphere
-          count={count}
+          count={resolvedCount}
           radius={radius}
           noiseFreq={noiseFreq}
           noiseAmp={noiseAmp}
