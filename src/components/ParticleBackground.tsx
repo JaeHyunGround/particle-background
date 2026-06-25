@@ -1,7 +1,42 @@
 import { useRef, useEffect, useState, useMemo } from "react";
-import { Canvas } from "@react-three/fiber";
+import { Canvas, useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import { ParticleSphere, type PointerState } from "./ParticleSphere";
+
+/**
+ * FpsMeter — dev 전용 경량 FPS 오버레이.
+ * useFrame이 '실제 렌더된 프레임'마다 호출되므로 frameloop="demand"에서도
+ * 정상 동작한다(= 캡이 60으로 먹으면 60으로 표시). r3f-perf는 demand에서 측정 불가.
+ */
+function FpsMeter() {
+  const elRef = useRef<HTMLDivElement | null>(null);
+  const frames = useRef(0);
+  const last = useRef(0);
+  useEffect(() => {
+    const div = document.createElement("div");
+    div.style.cssText =
+      "position:fixed;top:8px;left:8px;z-index:9999;font:12px/1.4 monospace;" +
+      "color:#7CFC00;background:rgba(0,0,0,.55);padding:4px 7px;border-radius:4px;pointer-events:none";
+    div.textContent = "-- fps";
+    document.body.appendChild(div);
+    elRef.current = div;
+    return () => div.remove();
+  }, []);
+  useFrame(() => {
+    frames.current++;
+    const now = performance.now();
+    if (last.current === 0) last.current = now;
+    const dt = now - last.current;
+    if (dt >= 500) {
+      const fps = Math.round((frames.current * 1000) / dt);
+      if (elRef.current)
+        elRef.current.textContent = `${fps} fps (${(1000 / Math.max(fps, 1)).toFixed(1)} ms)`;
+      frames.current = 0;
+      last.current = now;
+    }
+  });
+  return null;
+}
 
 /**
  * ParticleBackground — 외부 노출 컴포넌트 (역할 기반 네이밍)
@@ -113,6 +148,8 @@ export function ParticleBackground({
     <div style={wrapperStyle}>
       {/* dpr 상한: 데스크탑 1.5, 모바일 1 (약한 GPU 부하↓). 픽셀=fragment/오버드로우
           비용이라 발열에 직결. 품질 손실은 거의 없음. 카메라 z≈3. */}
+      {/* frameloop: 활성 시 always(네이티브 최대 프레임), 비활성(탭 숨김/창 blur) 시
+          never로 완전 정지(GPU 작업 0). */}
       <Canvas
         dpr={[1, maxDpr]}
         frameloop={active ? "always" : "never"}
@@ -120,6 +157,8 @@ export function ParticleBackground({
         gl={{ antialias: true }}
       >
         <color attach="background" args={["#000000"]} />
+        {/* 개발 모드에서만 FPS 오버레이 (프로덕션 빌드 제외). 발열/GPU 전력은 powermetrics로 */}
+        {import.meta.env.DEV && <FpsMeter />}
         <ParticleSphere
           count={resolvedCount}
           radius={radius}
