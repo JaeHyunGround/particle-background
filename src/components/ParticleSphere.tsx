@@ -324,7 +324,7 @@ export function ParticleSphere({
   //   0.04 → 각 입자에 작은 랜덤 지터를 더해 격자를 흐트러뜨림 → 부드러운 먼지
   //          (dusty) 그레인. 빗살(moiré)은 사라지고 마우스 구멍 경계도 더 부드럽다.
   //   ※ '먼지 질감'으로 바꾸려면 아래 값을 0.04 로 바꾸면 된다.
-  const JITTER_RATIO = 0.04;
+  const JITTER_RATIO = 0;
   const positions = useMemo(() => {
     const arr = new Float32Array(count * 3);
     const golden = Math.PI * (3 - Math.sqrt(5)); // 황금각
