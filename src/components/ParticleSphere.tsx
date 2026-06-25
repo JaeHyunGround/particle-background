@@ -1,9 +1,4 @@
-import {
-  useMemo,
-  useRef,
-  useLayoutEffect,
-  type MutableRefObject,
-} from "react";
+import { useMemo, useRef, useLayoutEffect, type MutableRefObject } from "react";
 import {
   useFrame,
   useThree,
@@ -168,11 +163,12 @@ const vertexShader = /* glsl */ `
   uniform float uPixelRatio;  // 디바이스 픽셀 비율 (gl_PointSize 보정용)
   uniform float uSphericity;  // 구 형태 유지 정도 (1=완벽한 구, 0=자유 curl 구름)
 
-  // ── 2단계: 마우스 인터랙션 유니폼 ──
-  uniform vec3  uMouse;          // 마우스 월드 좌표 (useFrame에서 raycast+lerp로 추적)
+  // ── 2단계: 마우스 인터랙션 유니폼 (화면 공간 게이팅) ──
+  uniform vec2  uMouseScreen;    // 마우스 NDC 좌표(-1~1), useFrame에서 부드럽게 추적
+  uniform float uAspect;         // 뷰포트 종횡비 (영향범위를 원형으로 보정)
   uniform float uMouseStrength;  // 마우스 영향 강도 0~1 (움직이면↑, 멈추면 0으로 감쇠)
-  uniform float uMouseRadius;    // 반발 영향 반경 (이 반경 안의 입자만 휘저어짐)
-  uniform float uMousePush;      // 반발 세기 (입자를 바깥으로 밀어내는 양)
+  uniform float uMouseRadius;    // 반발 영향 반경 (화면/NDC 단위)
+  uniform float uMousePush;      // 반발 세기 (커서 아래 입자를 옆으로 밀어내는 양)
 
   attribute vec3 aBase;       // 각 입자의 기준 위치 (피보나치 구 분포)
 
@@ -196,17 +192,28 @@ const vertexShader = /* glsl */ `
     vec3 onSphere = normalize(displaced) * baseRadius;
     displaced = mix(displaced, onSphere, uSphericity);
 
-    // 마우스 반발: 커서(uMouse) 주변 입자를 바깥으로 밀어낸다.
-    // 이 <points>는 모델 변환이 없어 object=world → displaced를 월드 위치로 사용.
-    // (구 표면 재투영 '이후'에 더해야 입자가 구 밖으로 휘저어지는 게 보인다)
-    vec3 toMouse = displaced - uMouse;
-    float mDist = length(toMouse);
-    float falloff = smoothstep(uMouseRadius, 0.0, mDist); // 반경 안에서만 1→0
-    // mDist=0 근처 normalize NaN 방지(epsilon)
-    vec3 push = (toMouse / max(mDist, 1e-4)) * falloff * uMousePush * uMouseStrength;
-    displaced += push;
-
+    // 마우스 반발(화면 공간): 커서가 화면에서 '그 아래 있는' 입자를 옆으로 밀어
+    // 구멍(void)을 만든다. 입자의 화면 위치(NDC)와 커서 NDC의 2D 거리로 게이팅
+    // 하므로 구의 중앙/가장자리 어디든 균일하게 반응한다. 밀려난 입자는 구멍
+    // 가장자리에 응축돼 밝은 테두리가 된다.
     vec4 mvPosition = modelViewMatrix * vec4(displaced, 1.0);
+    vec4 clip = projectionMatrix * mvPosition;
+    vec2 pNDC = clip.xy / clip.w;              // 입자의 화면 위치(NDC)
+    vec2 sd = pNDC - uMouseScreen;
+    sd.x *= uAspect;                           // 종횡비 보정
+    float sDist = length(sd);
+    // 경계를 노이즈로 흔들어 '완벽한 원 테두리'의 이질감을 없애고 유기적으로 만든다.
+    // (천천히 일렁이는 큰 노이즈 → 구멍 가장자리가 물결치듯 자연스럽게 변형)
+    float edgeNoise = snoise(vec3(pNDC * 2.0, uTime * 0.35));
+    float r = uMouseRadius * (1.0 + 0.4 * edgeNoise);
+    float falloff = smoothstep(r, 0.0, sDist);
+    vec2 dir = sd / max(sDist, 1e-4);          // sDist=0 근처 NaN 방지(epsilon)
+    // 반발(radial) + 약한 소용돌이(tangential) → 입자가 테두리에 정렬되지 않고
+    // 휘돌며 흐른다 → 딱딱한 원형 띠 대신 자연스러운 가장자리
+    vec2 swirl = vec2(-dir.y, dir.x);
+    vec2 push2 = (dir + swirl * 0.6) * falloff * uMousePush * uMouseStrength;
+    mvPosition.xy += push2;
+
     gl_Position = projectionMatrix * mvPosition;
 
     // 점 크기 = 기준 크기 × DPR 보정 × 원근 감쇠(멀수록 작게).
@@ -248,10 +255,11 @@ const ParticleSphereMaterial = shaderMaterial(
     uPixelRatio: 1, // 컴포넌트 마운트 시 실제 렌더러 DPR로 갱신
     uSphericity: 1, // 구 형태 유지 정도 (1=완벽한 구)
     uOpacity: 0, // 페이드인 시작값 0
-    uMouse: new THREE.Vector3(0, 0, 0), // 마우스 월드 좌표 (매 프레임 추적)
+    uMouseScreen: new THREE.Vector2(0, 0), // 마우스 NDC (매 프레임 추적)
+    uAspect: 1, // 뷰포트 종횡비 (컴포넌트에서 갱신)
     uMouseStrength: 0, // 마우스 영향 강도 0~1 (움직이면↑, 멈추면 0)
-    uMouseRadius: 0.7, // 반발 영향 반경 (커서 주변 dent 크기)
-    uMousePush: 0.5, // 반발 세기 (커서 위치를 움푹 패이게)
+    uMouseRadius: 0.45, // 반발 영향 반경(NDC) — 커서 주변 구멍 크기
+    uMousePush: 0.4, // 반발 세기 (커서 아래 입자를 옆으로 밀어내는 양)
   },
   vertexShader,
   fragmentShader,
@@ -296,26 +304,21 @@ export function ParticleSphere({
 
   // 실제 렌더러의 DPR (gl_PointSize 보정용)
   const pixelRatio = useThree((s) => s.gl.getPixelRatio());
-  // 마우스 raycast에 필요한 카메라
-  const camera = useThree((s) => s.camera);
+  // 뷰포트 크기 (종횡비 계산용 — 영향범위를 원형으로 보정)
+  const size = useThree((s) => s.size);
 
-  // 마우스 좌표 계산용 재사용 객체(매 프레임 new 방지)
-  const ray = useMemo(() => new THREE.Raycaster(), []);
-  const plane = useMemo(() => new THREE.Plane(), []);
-  const planeNormal = useMemo(() => new THREE.Vector3(), []);
-  const hitPoint = useMemo(() => new THREE.Vector3(), []);
-  const ORIGIN = useMemo(() => new THREE.Vector3(0, 0, 0), []); // 구 중심
-  const mouseSphere = useMemo(() => new THREE.Sphere(), []); // raycast 대상 구
+  // 부드럽게 추적하는 마우스 NDC (매 프레임 pointer 쪽으로 lerp)
+  const smoothMouse = useMemo(() => new THREE.Vector2(0, 0), []);
 
   // aBase: 피보나치 구 분포로 구 표면에 균등 분포한 기준 위치 (마운트 시 1회).
   //
   // ── [질감 토글] JITTER_RATIO ─────────────────────────────────────────────
-  //   0.0  → 완벽한 나선 격자 그대로. curl 변위 시 또렷한 sheet/결 질감(이전 버전).
-  //          ※ 현재 선택: 사용자가 이 질감을 선호.
+  //   0.0  → 완벽한 나선 격자 그대로. curl 변위 시 또렷한 sheet/결 질감.
+  //          ※ 현재 선택.
   //   0.04 → 각 입자에 작은 랜덤 지터를 더해 격자를 흐트러뜨림 → 부드러운 먼지
-  //          (dusty) 그레인. 빗살(moiré)은 사라지지만 결이 뭉개진다.
-  //   ※ '먼지 느낌'으로 되돌리려면 아래 값을 0.04 로 바꾸면 된다.
-  const JITTER_RATIO = 0.0;
+  //          (dusty) 그레인. 빗살(moiré)은 사라지고 마우스 구멍 경계도 더 부드럽다.
+  //   ※ '먼지 질감'으로 바꾸려면 아래 값을 0.04 로 바꾸면 된다.
+  const JITTER_RATIO = 0.04;
   const positions = useMemo(() => {
     const arr = new Float32Array(count * 3);
     const golden = Math.PI * (3 - Math.sqrt(5)); // 황금각
@@ -343,23 +346,11 @@ export function ParticleSphere({
 
     const ps = pointer.current;
 
-    // 2) uMouse 추적: NDC → 3D 좌표. 먼저 '반지름 구 표면'에 raycast 한다.
-    //    커서를 구 표면점(앞면 껍질)으로 매핑해야, 화면 중앙(=구 중심 투영)에서도
-    //    앞면 입자가 커서와 가까워 반발 효과가 난다. (평면에 투영하면 중앙에서
-    //    커서가 구 중심에 놓여 모든 껍질 입자가 반경 밖이라 효과가 안 났음.)
-    //    구 실루엣 밖이면 구 중심 평면으로 폴백해 끊김 없이 이어준다.
-    ray.setFromCamera(ps.ndc, camera);
-    const uMouse = mat.uniforms.uMouse.value as THREE.Vector3;
-    const k = 1 - Math.exp(-6 * delta); // 프레임레이트 무관 추적 계수
-    mouseSphere.set(ORIGIN, radius);
-    if (ray.ray.intersectSphere(mouseSphere, hitPoint)) {
-      uMouse.lerp(hitPoint, k);
-    } else {
-      // 구 밖: 구 중심을 지나고 카메라를 향하는 평면으로 폴백
-      camera.getWorldDirection(planeNormal);
-      plane.setFromNormalAndCoplanarPoint(planeNormal, ORIGIN);
-      if (ray.ray.intersectPlane(plane, hitPoint)) uMouse.lerp(hitPoint, k);
-    }
+    // 2) 마우스 화면 좌표 추적: 포인터 NDC를 향해 부드럽게 lerp(관성).
+    //    프레임레이트 무관(초당 수렴속도 6을 delta로 환산). 종횡비도 매 프레임 갱신.
+    smoothMouse.lerp(ps.ndc, 1 - Math.exp(-6 * delta));
+    (mat.uniforms.uMouseScreen.value as THREE.Vector2).copy(smoothMouse);
+    mat.uniforms.uAspect.value = size.width / size.height;
 
     // 3) uMouseStrength: 호버(active) 중이면 1로 램프업, 창 밖으로 나가면 0으로
     //    감쇠. 들어올 때는 빠르게(rate 8), 나갈 때는 천천히(rate 3) 수렴해서
