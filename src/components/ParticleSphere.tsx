@@ -197,29 +197,30 @@ const vertexShader = /* glsl */ `
     // 구가 한 점에서 부풀어오르듯 등장한다. (GSAP가 ease와 함께 0→1로 트윈)
     displaced *= uIntro;
 
-    // 마우스 반발(화면 공간): 커서가 화면에서 '그 아래 있는' 입자를 옆으로 밀어
-    // 구멍(void)을 만든다. 입자의 화면 위치(NDC)와 커서 NDC의 2D 거리로 게이팅
-    // 하므로 구의 중앙/가장자리 어디든 균일하게 반응한다. 밀려난 입자는 구멍
-    // 가장자리에 응축돼 밝은 테두리가 된다.
+    // 마우스 구멍(화면 공간, 면적 보존): 커서 아래 입자를 거리 d→√(d²+h²)로
+    // 재매핑해 구멍을 연다. 이 변환은 밀도를 보존하므로 입자가 가장자리에 뭉쳐
+    // '두꺼운 테두리'가 생기지 않고 자연스럽게 갈라진다. 화면공간이라 구의
+    // 중앙/가장자리 어디든 반응한다. (h=구멍 반경, uMouseStrength로 0→최대.
+    // 경계 노이즈로 완벽한 원을 깨 유기적으로 만든다.)
+    // ※ 구멍 크기는 uMouseRadius로 조절. uMousePush는 이 방식에선 사용하지 않음.
     vec4 mvPosition = modelViewMatrix * vec4(displaced, 1.0);
     vec4 clip = projectionMatrix * mvPosition;
     vec2 pNDC = clip.xy / clip.w;              // 입자의 화면 위치(NDC)
     vec2 sd = pNDC - uMouseScreen;
-    sd.x *= uAspect;                           // 종횡비 보정
-    float sDist = length(sd);
-    // 경계를 노이즈로 흔들어 '완벽한 원 테두리'의 이질감을 없애고 유기적으로 만든다.
-    // (천천히 일렁이는 큰 노이즈 → 구멍 가장자리가 물결치듯 자연스럽게 변형)
+    sd.x *= uAspect;                           // 종횡비 보정(원형 구멍)
+    float d = length(sd);
     float edgeNoise = snoise(vec3(pNDC * 2.0, uTime * 0.35));
-    float r = uMouseRadius * (1.0 + 0.4 * edgeNoise);
-    float falloff = smoothstep(r, 0.0, sDist);
-    vec2 dir = sd / max(sDist, 1e-4);          // sDist=0 근처 NaN 방지(epsilon)
-    // 반발(radial) + 약한 소용돌이(tangential) → 입자가 테두리에 정렬되지 않고
-    // 휘돌며 흐른다 → 딱딱한 원형 띠 대신 자연스러운 가장자리
-    vec2 swirl = vec2(-dir.y, dir.x);
-    vec2 push2 = (dir + swirl * 0.6) * falloff * uMousePush * uMouseStrength;
-    mvPosition.xy += push2;
-
-    gl_Position = projectionMatrix * mvPosition;
+    float h = max(uMouseRadius * uMouseStrength * (1.0 + 0.3 * edgeNoise), 0.0);
+    float dNew = sqrt(d * d + h * h);          // 면적 보존 구멍 변환(테두리 응집 없음)
+    // 가장자리에 얇은 응집 띠를 '살짝' 추가 → 은은한 테두리.
+    // RIM_STRENGTH: 0=테두리 없음(완전 평평), 클수록 두꺼워짐. (구멍 안으론 안 넘어감)
+    const float RIM_STRENGTH = 0.22;
+    float rimBand = exp(-pow((dNew - h) / max(h * 0.35, 1e-3), 2.0)); // 구멍 가장자리에서 1
+    dNew = max(dNew - RIM_STRENGTH * h * rimBand, h);
+    vec2 sdNew = (sd / max(d, 1e-4)) * dNew;
+    sdNew.x /= uAspect;                        // 종횡비 복원
+    clip.xy = (uMouseScreen + sdNew) * clip.w; // NDC → clip 좌표
+    gl_Position = clip;
 
     // 점 크기 = 기준 크기 × DPR 보정 × 원근 감쇠(멀수록 작게).
     // POINT_SCALE: 카메라 z≈3에서 uPointSize≈1.5가 화면상 ~3px의 섬세한
