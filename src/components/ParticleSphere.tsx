@@ -173,6 +173,8 @@ const vertexShader = /* glsl */ `
 
   attribute vec3 aBase;       // 각 입자의 기준 위치 (피보나치 구 분포)
 
+  varying float vFade;        // 마우스 페이드(투명도) — 프래그먼트로 전달 (1=불투명)
+
   ${glslSimplexNoise}
   ${glslCurlNoise}
 
@@ -197,29 +199,42 @@ const vertexShader = /* glsl */ `
     // 구가 한 점에서 부풀어오르듯 등장한다. (GSAP가 ease와 함께 0→1로 트윈)
     displaced *= uIntro;
 
-    // 마우스 구멍(화면 공간, 면적 보존): 커서 아래 입자를 거리 d→√(d²+h²)로
-    // 재매핑해 구멍을 연다. 이 변환은 밀도를 보존하므로 입자가 가장자리에 뭉쳐
-    // '두꺼운 테두리'가 생기지 않고 자연스럽게 갈라진다. 화면공간이라 구의
-    // 중앙/가장자리 어디든 반응한다. (h=구멍 반경, uMouseStrength로 0→최대.
-    // 경계 노이즈로 완벽한 원을 깨 유기적으로 만든다.)
-    // ※ 구멍 크기는 uMouseRadius로 조절. uMousePush는 이 방식에선 사용하지 않음.
+    // ── 마우스 인터랙션 방식 선택 (값 바꾸고 하드 리프레시로 비교) ──
+    //   0 = 부드러운 페이드(투명도)  /  1 = 소용돌이(warp)  /  2 = 부드러운 가장자리 구멍
+    #define MOUSE_MODE 2
+
     vec4 mvPosition = modelViewMatrix * vec4(displaced, 1.0);
     vec4 clip = projectionMatrix * mvPosition;
     vec2 pNDC = clip.xy / clip.w;              // 입자의 화면 위치(NDC)
     vec2 sd = pNDC - uMouseScreen;
-    sd.x *= uAspect;                           // 종횡비 보정(원형 구멍)
+    sd.x *= uAspect;                           // 종횡비 보정(원형 영향범위)
     float d = length(sd);
+    // 경계 없는 부드러운 영향(가우시안) + 천천히 일렁이는 노이즈로 비대칭성
     float edgeNoise = snoise(vec3(pNDC * 2.0, uTime * 0.35));
+    float infl = exp(-pow(d / max(uMouseRadius, 1e-3), 2.0)) * uMouseStrength;
+    vFade = 1.0;
+
+  #if MOUSE_MODE == 0
+    // [0] 부드러운 페이드: 변위 없음. 커서 근처 입자를 투명하게 → 경계 없는 소프트홀.
+    vFade = 1.0 - infl;
+  #elif MOUSE_MODE == 1
+    // [1] 소용돌이(warp): 커서 중심으로 회전 → sheet 휘말림. 밀도 보존(구멍/테두리 없음).
+    float angle = infl * uMousePush * 5.0 * (1.0 + 0.3 * edgeNoise);
+    float s = sin(angle), c = cos(angle);
+    vec2 sw = vec2(sd.x * c - sd.y * s, sd.x * s + sd.y * c);
+    sw *= 1.0 - infl * 0.2;                     // 살짝 빨려드는 느낌
+    sw.x /= uAspect;
+    clip.xy = (uMouseScreen + sw) * clip.w;
+  #else
+    // [2] 부드러운 가장자리 구멍: 면적 보존 구멍 + 가장자리 alpha 페더 → 딱딱한 원 완화.
     float h = max(uMouseRadius * uMouseStrength * (1.0 + 0.3 * edgeNoise), 0.0);
-    float dNew = sqrt(d * d + h * h);          // 면적 보존 구멍 변환(테두리 응집 없음)
-    // 가장자리에 얇은 응집 띠를 '살짝' 추가 → 은은한 테두리.
-    // RIM_STRENGTH: 0=테두리 없음(완전 평평), 클수록 두꺼워짐. (구멍 안으론 안 넘어감)
-    const float RIM_STRENGTH = 0.22;
-    float rimBand = exp(-pow((dNew - h) / max(h * 0.35, 1e-3), 2.0)); // 구멍 가장자리에서 1
-    dNew = max(dNew - RIM_STRENGTH * h * rimBand, h);
+    float dNew = sqrt(d * d + h * h);
     vec2 sdNew = (sd / max(d, 1e-4)) * dNew;
-    sdNew.x /= uAspect;                        // 종횡비 복원
-    clip.xy = (uMouseScreen + sdNew) * clip.w; // NDC → clip 좌표
+    sdNew.x /= uAspect;
+    clip.xy = (uMouseScreen + sdNew) * clip.w;
+    vFade = 1.0 - 0.5 * exp(-pow((dNew - h) / max(h * 0.6, 1e-3), 2.0));
+  #endif
+
     gl_Position = clip;
 
     // 점 크기 = 기준 크기 × DPR 보정 × 원근 감쇠(멀수록 작게).
@@ -236,12 +251,14 @@ const vertexShader = /* glsl */ `
 // ────────────────────────────────────────────────────────────────────────────
 const fragmentShader = /* glsl */ `
   uniform float uOpacity; // 등장 연출용 전체 알파 (0→1 페이드인)
+  varying float vFade;     // 마우스 페이드(투명도) — 1=불투명, 0=완전 투명
 
   void main(){
     // 점 중심으로부터의 거리 (0=중심, 0.5=가장자리)
     float dist = length(gl_PointCoord - vec2(0.5));
     // 가장자리로 갈수록 알파 감쇠 → 부드러운 원형
     float alpha = smoothstep(0.5, 0.0, dist);
+    alpha *= vFade; // 마우스 페이드(방식 0/2에서 사용; 1에선 항상 1)
     if (alpha < 0.01) discard;
 
     gl_FragColor = vec4(vec3(1.0), alpha * uOpacity);
