@@ -36,12 +36,12 @@ const wrapperStyle: React.CSSProperties = {
 };
 
 export function ParticleBackground({
-  count = 300000,
+  count = 150000,
   radius = 1.0,
   noiseFreq = 0.8,
   noiseAmp = 0.2,
   flowSpeed = 0.15,
-  pointSize = 0.8,
+  pointSize = 1.0,
   sphericity = 1.0, // 기본: 완벽한 구 실루엣 유지
   mouseRadius = 0.45,
   mousePush = 0.4,
@@ -84,9 +84,10 @@ export function ParticleBackground({
 
   return (
     <div style={wrapperStyle}>
-      {/* dpr [1,2]: 레티나 품질 + 과도한 픽셀 부하 방지. 카메라 z≈3. */}
+      {/* dpr 상한 1.5: 레티나에서 픽셀(=fragment/오버드로우) 부하를 줄여 발열 완화.
+          품질 손실은 거의 없음. 더 선명하게/더 가볍게는 이 값으로 조절. 카메라 z≈3. */}
       <Canvas
-        dpr={[1, 2]}
+        dpr={[1, 1.5]}
         camera={{ position: [0, 0, 3], fov: 50 }}
         gl={{ antialias: true }}
       >
