@@ -129,30 +129,50 @@ export function ParticleBackground({
     };
   }, [isTouch]);
 
-  // 탭이 숨겨지거나 창 포커스가 빠지면 렌더 루프를 멈춰 GPU 작업을 0으로 만든다.
-  // (안 보이는 동안 발열/배터리 절약 — 부작용 없는 가장 효과적인 최적화)
+  // '실제로 보일 때만' 렌더 루프를 돌려 GPU 작업을 아낀다(안 보이면 정지).
+  //   - visibilitychange: 탭이 숨겨지면 정지 (iframe도 부모 탭 따라감)
+  //   - IntersectionObserver: 캔버스가 화면 밖(스크롤 아웃)이면 정지
+  // document.hasFocus()는 쓰지 않는다 — iframe 안에선 보통 false라 멀쩡히 보여도
+  // 멈춰버린다. '보이는지' 기준이라야 iframe 임베드에서도 정상 동작한다.
+  const wrapperRef = useRef<HTMLDivElement>(null);
   const [active, setActive] = useState(true);
   useEffect(() => {
-    const update = () =>
-      setActive(document.visibilityState === "visible" && document.hasFocus());
-    update();
-    document.addEventListener("visibilitychange", update);
-    window.addEventListener("focus", update);
-    window.addEventListener("blur", update);
+    let tabVisible = document.visibilityState === "visible";
+    let inView = true;
+    const apply = () => setActive(tabVisible && inView);
+
+    const onVis = () => {
+      tabVisible = document.visibilityState === "visible";
+      apply();
+    };
+    document.addEventListener("visibilitychange", onVis);
+
+    let io: IntersectionObserver | undefined;
+    const el = wrapperRef.current;
+    if (el && "IntersectionObserver" in window) {
+      io = new IntersectionObserver(
+        (entries) => {
+          inView = entries[0]?.isIntersecting ?? true;
+          apply();
+        },
+        { threshold: 0 },
+      );
+      io.observe(el);
+    }
+    apply();
     return () => {
-      document.removeEventListener("visibilitychange", update);
-      window.removeEventListener("focus", update);
-      window.removeEventListener("blur", update);
+      document.removeEventListener("visibilitychange", onVis);
+      io?.disconnect();
     };
   }, []);
 
   return (
-    <div style={wrapperStyle}>
+    <div ref={wrapperRef} style={wrapperStyle}>
       {/* dpr 상한: 데스크탑 1.5, 모바일 1 (약한 GPU 부하↓). 픽셀=fragment/오버드로우
           비용이라 발열에 직결. 품질 손실은 거의 없음. 카메라 z≈3. */}
       {/* frameloop: 활성 시 — fps 미설정이면 always(네이티브 최대 프레임=최상 품질),
           fps 설정이면 demand(ParticleSphere가 그 상한으로 invalidate).
-          비활성(탭 숨김/창 blur) 시 never로 완전 정지. */}
+          비활성(탭 숨김/화면 밖) 시 never로 완전 정지. */}
       <Canvas
         dpr={[1, maxDpr]}
         frameloop={active ? (fps != null ? "demand" : "always") : "never"}
