@@ -171,11 +171,12 @@ const vertexShader = /* glsl */ `
   uniform float uSphericity;  // 구 형태 유지 정도 (1=완벽한 구, 0=자유 curl 구름)
   uniform float uIntro;       // 등장 연출: 0=중심 한 점 → 1=완전한 구 (부풀어오름)
 
-  // ── 2단계: 마우스 인터랙션 유니폼 (화면 공간 게이팅) ──
-  uniform vec2  uMouseScreen;    // 마우스 NDC 좌표(-1~1), useFrame에서 부드럽게 추적
+  // ── 2단계: 마우스 인터랙션 유니폼 ──
+  uniform vec2  uMouseScreen;    // 마우스 NDC 좌표(-1~1) — 소용돌이 '방향'(화면)용
+  uniform vec3  uMouseWorld;     // 커서를 구 표면에 raycast한 3D 좌표 — '게이팅'(깊이)용
   uniform float uAspect;         // 뷰포트 종횡비 (영향범위를 원형으로 보정)
   uniform float uMouseStrength;  // 마우스 영향 강도 0~1 (움직이면↑, 멈추면 0으로 감쇠)
-  uniform float uMouseRadius;    // 반발 영향 반경 (화면/NDC 단위)
+  uniform float uMouseRadius;    // 반발 영향 반경 (3D 월드 단위 — 구 반지름≈1 기준)
   uniform float uMousePush;      // 반발 세기 (커서 아래 입자를 옆으로 밀어내는 양)
 
   attribute vec3 aBase;       // 각 입자의 기준 위치 (피보나치 구 분포)
@@ -218,7 +219,14 @@ const vertexShader = /* glsl */ `
     float d = length(sd);
     // 경계 없는 부드러운 영향(가우시안) + 천천히 일렁이는 노이즈로 비대칭성
     float edgeNoise = snoise(vec3(pNDC * 2.0, uTime * 0.35));
-    float infl = exp(-pow(d / max(uMouseRadius, 1e-3), 2.0)) * uMouseStrength;
+    // 3D 깊이 게이트: 커서를 구 표면에 raycast한 3D점(uMouseWorld)과의 월드 거리로
+    // 게이팅 → 화면상 커서 아래라도 '뒤쪽' 입자는 3D상 멀어서 반응 안 함(깊이 인지).
+    // 구가 자전하면 표면이 커서 밑으로 흘러가며 닿는 = 커서가 3D 공간을 지나가는 느낌.
+    const float GATE3D = 0.6; // 3D 영향 반경(월드, 구 반지름≈1 기준)
+    vec3 worldPos = (modelMatrix * vec4(displaced, 1.0)).xyz;
+    float gate3D = exp(-pow(distance(worldPos, uMouseWorld) / GATE3D, 2.0));
+    // 화면상 영향(모양·반경) × 3D 깊이 게이트 × 세기
+    float infl = exp(-pow(d / max(uMouseRadius, 1e-3), 2.0)) * gate3D * uMouseStrength;
     vFade = 1.0;
 
   #if MOUSE_MODE == 0
@@ -287,6 +295,7 @@ const ParticleSphereMaterial = shaderMaterial(
     uIntro: 0.1, // 등장 연출 시작값 0.1 (10% 크기) → GSAP가 1로 (부풀어오름)
     uOpacity: 0, // 페이드인 시작값 0
     uMouseScreen: new THREE.Vector2(0, 0), // 마우스 NDC (매 프레임 추적)
+    uMouseWorld: new THREE.Vector3(0, 0, 1), // 커서의 구 표면 3D 좌표 (3D 게이팅)
     uAspect: 1, // 뷰포트 종횡비 (컴포넌트에서 갱신)
     uMouseStrength: 0, // 마우스 영향 강도 0~1 (움직이면↑, 멈추면 0)
     uMouseRadius: 0.45, // 반발 영향 반경(NDC) — 커서 주변 구멍 크기
@@ -340,6 +349,13 @@ export function ParticleSphere({
   const size = useThree((s) => s.size);
   // demand 모드에서 한 프레임 렌더를 요청하는 함수
   const invalidate = useThree((s) => s.invalidate);
+  // 마우스 3D 게이팅: 커서를 구 표면에 raycast하기 위한 카메라/재사용 객체
+  const camera = useThree((s) => s.camera);
+  const ray = useMemo(() => new THREE.Raycaster(), []);
+  const mouseSphere = useMemo(() => new THREE.Sphere(), []);
+  const hitPoint = useMemo(() => new THREE.Vector3(), []);
+  const ORIGIN = useMemo(() => new THREE.Vector3(0, 0, 0), []);
+  const smoothMouseWorld = useMemo(() => new THREE.Vector3(0, 0, 1), []);
 
   // 프레임 상한(fps): Canvas가 frameloop="demand"라 invalidate 할 때만 렌더된다.
   // 가벼운 rAF 루프(60Hz)에서 fps 주기로만 invalidate → 120Hz 화면이어도 실제
@@ -402,18 +418,26 @@ export function ParticleSphere({
 
     const ps = pointer.current;
 
-    // 2) 마우스 화면 좌표 추적: 포인터 NDC를 향해 부드럽게 lerp(관성).
-    //    프레임레이트 무관(초당 수렴속도 6을 delta로 환산). 종횡비도 매 프레임 갱신.
-    smoothMouse.lerp(ps.ndc, 1 - Math.exp(-6 * dt));
+    const k6 = 1 - Math.exp(-6 * dt); // 추적 보간 계수(프레임레이트 무관)
+
+    // 2a) 화면 좌표(소용돌이 '방향'용): 포인터 NDC를 향해 부드럽게 추적
+    smoothMouse.lerp(ps.ndc, k6);
     (mat.uniforms.uMouseScreen.value as THREE.Vector2).copy(smoothMouse);
     mat.uniforms.uAspect.value = size.width / size.height;
 
-    // 3) uMouseStrength: 호버(active) 중이면 1로 램프업, 창 밖으로 나가면 0으로
-    //    감쇠. 들어올 때는 빠르게(rate 8), 나갈 때는 천천히(rate 3) 수렴해서
-    //    마우스를 올려두면 강하게 반응하고, 빼면 ~1.5초에 걸쳐 잔잔해진다.
-    //    delta 기반이라 프레임레이트가 달라도 체감 속도가 동일하다.
-    const target = ps.active ? 1 : 0;
-    const rate = ps.active ? 8 : 3; // 초당 수렴 속도
+    // 2b) 3D 좌표(깊이 '게이팅'용): 커서를 구 표면(앞면)에 raycast → 그 월드점 추적.
+    //     자전과 무관하게 구는 항상 반지름 radius의 구라 raycast 결과가 정확하다.
+    ray.setFromCamera(ps.ndc, camera);
+    mouseSphere.set(ORIGIN, radius);
+    const onSphere = ray.ray.intersectSphere(mouseSphere, hitPoint) ? 1 : 0;
+    if (onSphere) smoothMouseWorld.lerp(hitPoint, k6);
+    (mat.uniforms.uMouseWorld.value as THREE.Vector3).copy(smoothMouseWorld);
+
+    // 3) uMouseStrength: 호버 중 '그리고 커서가 구 위에 있을 때만' 1로, 아니면 0.
+    //    (구 밖이면 닿을 표면이 없으니 효과 없음) — 들어올 때 빠르게, 나갈 때 천천히.
+    const onAndActive = ps.active && onSphere ? 1 : 0;
+    const target = onAndActive;
+    const rate = onAndActive ? 8 : 3; // 초당 수렴 속도
     const k = 1 - Math.exp(-rate * dt);
     const cur = mat.uniforms.uMouseStrength.value as number;
     mat.uniforms.uMouseStrength.value = THREE.MathUtils.lerp(cur, target, k);
