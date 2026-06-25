@@ -252,6 +252,12 @@ const vertexShader = /* glsl */ `
 
     gl_Position = clip;
 
+    // 깊이감(3D): 카메라에서 먼 '뒤쪽' 입자를 어둡게 → 평평한 노이즈가 아니라
+    // 속이 보이는 입체 구로 읽힌다. (-mvPosition.z: 앞≈2, 중심≈3, 뒤≈4)
+    const float BACK_DIM = 0.18; // 뒤쪽 최소 밝기 (0=완전 어둠 / 1=음영 없음)
+    float depth = smoothstep(4.5, 1.8, -mvPosition.z); // 앞=1, 뒤=0
+    vFade *= mix(BACK_DIM, 1.0, depth);
+
     // 점 크기 = 기준 크기 × DPR 보정 × 원근 감쇠(멀수록 작게).
     // POINT_SCALE: 카메라 z≈3에서 uPointSize≈1.5가 화면상 ~3px의 섬세한
     // 점이 되도록 잡은 기준 상수. (값이 너무 크면 점들이 포화되어 흰 덩어리가 됨)
@@ -342,6 +348,8 @@ export function ParticleSphere({
       uniforms: Record<string, THREE.IUniform>;
     }
   >(null);
+  // 자동 회전용 points ref (입체감)
+  const pointsRef = useRef<THREE.Points>(null);
 
   // 실제 렌더러의 DPR (gl_PointSize 보정용)
   const pixelRatio = useThree((s) => s.gl.getPixelRatio());
@@ -415,6 +423,10 @@ export function ParticleSphere({
 
     // 1) 상시 흐름(ambient) — 마우스와 무관하게 항상 전진
     mat.uniforms.uTime.value += dt;
+
+    // 자동 회전(입체감): 구를 Y축으로 천천히 자전시켜 도는 게 보이게 한다.
+    const ROT_SPEED = 0.08; // rad/s (한 바퀴 ≈ 78초, 잔잔하게)
+    if (pointsRef.current) pointsRef.current.rotation.y += dt * ROT_SPEED;
 
     const ps = pointer.current;
 
@@ -500,7 +512,7 @@ export function ParticleSphere({
 
   return (
     // frustumCulled=false: 변위로 입자가 바운딩 박스를 벗어나도 컬링되지 않게
-    <points frustumCulled={false}>
+    <points ref={pointsRef} frustumCulled={false}>
       <bufferGeometry>
         <bufferAttribute attach="attributes-aBase" args={[positions, 3]} />
         {/* THREE.Points는 position 속성을 요구 — aBase와 동일 버퍼 재사용 */}
