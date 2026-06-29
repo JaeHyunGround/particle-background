@@ -173,7 +173,7 @@ const vertexShader = /* glsl */ `
 
   // ── 2단계: 마우스 인터랙션 유니폼 ──
   uniform vec2  uMouseScreen;    // 마우스 NDC 좌표(-1~1) — 소용돌이 '방향'(화면)용
-  uniform vec3  uMouseWorld;     // 커서를 구 표면에 raycast한 3D 좌표 — '게이팅'(깊이)용
+  uniform vec3  uMouseLocal;     // 커서를 구에 raycast→오브젝트 공간으로 역회전한 3D 좌표 — '게이팅'(깊이)용
   uniform float uAspect;         // 뷰포트 종횡비 (영향범위를 원형으로 보정)
   uniform float uMouseStrength;  // 마우스 영향 강도 0~1 (움직이면↑, 멈추면 0으로 감쇠)
   uniform float uMouseRadius;    // 반발 영향 반경 (3D 월드 단위 — 구 반지름≈1 기준)
@@ -200,7 +200,15 @@ const vertexShader = /* glsl */ `
     // 유지되면서 실루엣은 깔끔한 구가 된다.
     //   uSphericity=1 → 완벽한 구 / 0 → 자유 curl 구름 / 그 사이는 블렌딩
     float baseRadius = length(aBase);
-    vec3 onSphere = normalize(displaced) * baseRadius;
+    // 겉모양 morph: 방향별 저주파 노이즈 × 시간으로 반지름을 변형 → 구가 큰 로브가
+    // 천천히 움직이는 유기적 블롭이 되어 실루엣이 morph한다.
+    //   SHAPE_AMP=변형량(0이면 고정 구) / FREQ=로브 개수(작을수록 큼) / SPEED=morph 속도
+    const float SHAPE_AMP = 0.22;
+    const float SHAPE_FREQ = 0.9;
+    const float SHAPE_SPEED = 0.15;
+    float shape = snoise(normalize(aBase) * SHAPE_FREQ + vec3(uTime * SHAPE_SPEED));
+    float morphedRadius = baseRadius * (1.0 + SHAPE_AMP * shape);
+    vec3 onSphere = normalize(displaced) * morphedRadius;
     displaced = mix(displaced, onSphere, uSphericity);
 
     // 등장 연출: uIntro 0→1 동안 중심(원점)에서 최종 위치로 균일 스케일 →
@@ -219,14 +227,23 @@ const vertexShader = /* glsl */ `
     float d = length(sd);
     // 경계 없는 부드러운 영향(가우시안) + 천천히 일렁이는 노이즈로 비대칭성
     float edgeNoise = snoise(vec3(pNDC * 2.0, uTime * 0.35));
-    // 3D 깊이 게이트: 커서를 구 표면에 raycast한 3D점(uMouseWorld)과의 월드 거리로
-    // 게이팅 → 화면상 커서 아래라도 '뒤쪽' 입자는 3D상 멀어서 반응 안 함(깊이 인지).
-    // 구가 자전하면 표면이 커서 밑으로 흘러가며 닿는 = 커서가 3D 공간을 지나가는 느낌.
-    const float GATE3D = 0.6; // 3D 영향 반경(월드, 구 반지름≈1 기준)
-    vec3 worldPos = (modelMatrix * vec4(displaced, 1.0)).xyz;
-    float gate3D = exp(-pow(distance(worldPos, uMouseWorld) / GATE3D, 2.0));
-    // 화면상 영향(모양·반경) × 3D 깊이 게이트 × 세기
-    float infl = exp(-pow(d / max(uMouseRadius, 1e-3), 2.0)) * gate3D * uMouseStrength;
+    // 3D 깊이: 커서를 구에 raycast→오브젝트 공간 역회전(uMouseLocal)한 점에 입자와 '동일한
+    // morph'(같은 snoise·uTime)를 적용해 표면점 mSurf를 만들고, 그 view 공간 '깊이'를 구한다.
+    // 이 깊이를 '앞/뒤 선택'에만 쓴다(거리 기반 3D 공이 아니라). → 입자가 커서의 앞면 깊이
+    // 근처면 반응, 더 뒤(back)면 빠짐 = 화면상 같은 위치라도 뒷면은 안 닿는 3D 느낌.
+    //   ※ 화면상 원 '크기'는 아래 screenG(2D 가우시안)가 정하므로, 외곽(비스듬한 표면)에서도
+    //     깊이 단축(foreshortening)에 안 줄고 일정하다.
+    vec3 mDir = normalize(uMouseLocal);
+    float mShape = snoise(mDir * SHAPE_FREQ + vec3(uTime * SHAPE_SPEED));
+    vec3 mSurf = mDir * (baseRadius * (1.0 + SHAPE_AMP * mShape)) * uIntro;
+    float mouseViewZ = (modelViewMatrix * vec4(mSurf, 1.0)).z;
+    // 깊이 밴드: 입자 view-z가 커서 앞면 깊이 근처(앞쪽 한 반지름 이내)면 1, 더 뒤면 0.
+    // (view 공간은 카메라가 -z를 보므로 앞면이 덜 음수, 뒷면이 더 음수)
+    const float DEPTH_BAND = 1.0; // 앞면에서 받아들이는 깊이 두께(월드, 반지름≈1)
+    float frontSel = smoothstep(-DEPTH_BAND, -0.2 * DEPTH_BAND, mvPosition.z - mouseViewZ);
+    // 화면상 원(일정 크기) × 앞면 선택 × 세기
+    float screenG = exp(-pow(d / max(uMouseRadius, 1e-3), 2.0));
+    float infl = screenG * frontSel * uMouseStrength;
     vFade = 1.0;
 
   #if MOUSE_MODE == 0
@@ -242,7 +259,8 @@ const vertexShader = /* glsl */ `
     clip.xy = (uMouseScreen + sw) * clip.w;
   #else
     // [2] 부드러운 가장자리 구멍: 면적 보존 구멍 + 가장자리 alpha 페더 → 딱딱한 원 완화.
-    float h = max(uMouseRadius * uMouseStrength * (1.0 + 0.3 * edgeNoise), 0.0);
+    //     h는 infl(=화면원 × 앞면선택 × 세기)에 비례 → '앞면' 입자만 패임, 뒤쪽 그대로.
+    float h = max(uMouseRadius * infl * (1.0 + 0.3 * edgeNoise), 0.0);
     float dNew = sqrt(d * d + h * h);
     vec2 sdNew = (sd / max(d, 1e-4)) * dNew;
     sdNew.x /= uAspect;
@@ -301,7 +319,7 @@ const ParticleSphereMaterial = shaderMaterial(
     uIntro: 0.1, // 등장 연출 시작값 0.1 (10% 크기) → GSAP가 1로 (부풀어오름)
     uOpacity: 0, // 페이드인 시작값 0
     uMouseScreen: new THREE.Vector2(0, 0), // 마우스 NDC (매 프레임 추적)
-    uMouseWorld: new THREE.Vector3(0, 0, 1), // 커서의 구 표면 3D 좌표 (3D 게이팅)
+    uMouseLocal: new THREE.Vector3(0, 0, 1), // 커서의 구 표면 3D 좌표(오브젝트 공간) (3D 게이팅)
     uAspect: 1, // 뷰포트 종횡비 (컴포넌트에서 갱신)
     uMouseStrength: 0, // 마우스 영향 강도 0~1 (움직이면↑, 멈추면 0)
     uMouseRadius: 0.45, // 반발 영향 반경(NDC) — 커서 주변 구멍 크기
@@ -364,6 +382,9 @@ export function ParticleSphere({
   const hitPoint = useMemo(() => new THREE.Vector3(), []);
   const ORIGIN = useMemo(() => new THREE.Vector3(0, 0, 0), []);
   const smoothMouseWorld = useMemo(() => new THREE.Vector3(0, 0, 1), []);
+  // world→object 역변환용 (자전을 되돌려 morph와 같은 오브젝트 공간에서 게이팅)
+  const invModel = useMemo(() => new THREE.Matrix4(), []);
+  const mouseLocal = useMemo(() => new THREE.Vector3(0, 0, 1), []);
 
   // 프레임 상한(fps): Canvas가 frameloop="demand"라 invalidate 할 때만 렌더된다.
   // 가벼운 rAF 루프(60Hz)에서 fps 주기로만 invalidate → 120Hz 화면이어도 실제
@@ -443,7 +464,18 @@ export function ParticleSphere({
     mouseSphere.set(ORIGIN, radius);
     const onSphere = ray.ray.intersectSphere(mouseSphere, hitPoint) ? 1 : 0;
     if (onSphere) smoothMouseWorld.lerp(hitPoint, k6);
-    (mat.uniforms.uMouseWorld.value as THREE.Vector3).copy(smoothMouseWorld);
+    // 월드 → 오브젝트 공간으로 역회전: morph는 오브젝트 공간(aBase) 기준이라, 커서도
+    // 같은 공간으로 옮겨야 입자와 동일한 morph가 적용돼 표면에 정합된다.
+    // (이번 프레임에서 막 회전을 갱신했으니 matrixWorld를 먼저 최신화)
+    const pts = pointsRef.current;
+    if (pts) {
+      pts.updateMatrixWorld();
+      invModel.copy(pts.matrixWorld).invert();
+      mouseLocal.copy(smoothMouseWorld).applyMatrix4(invModel);
+    } else {
+      mouseLocal.copy(smoothMouseWorld);
+    }
+    (mat.uniforms.uMouseLocal.value as THREE.Vector3).copy(mouseLocal);
 
     // 3) uMouseStrength: 호버 중 '그리고 커서가 구 위에 있을 때만' 1로, 아니면 0.
     //    (구 밖이면 닿을 표면이 없으니 효과 없음) — 들어올 때 빠르게, 나갈 때 천천히.
