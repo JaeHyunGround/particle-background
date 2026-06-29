@@ -229,10 +229,7 @@ const vertexShader = /* glsl */ `
     float edgeNoise = snoise(vec3(pNDC * 2.0, uTime * 0.35));
     // 3D 깊이: 커서를 구에 raycast→오브젝트 공간 역회전(uMouseLocal)한 점에 입자와 '동일한
     // morph'(같은 snoise·uTime)를 적용해 표면점 mSurf를 만들고, 그 view 공간 '깊이'를 구한다.
-    // 이 깊이를 '앞/뒤 선택'에만 쓴다(거리 기반 3D 공이 아니라). → 입자가 커서의 앞면 깊이
-    // 근처면 반응, 더 뒤(back)면 빠짐 = 화면상 같은 위치라도 뒷면은 안 닿는 3D 느낌.
-    //   ※ 화면상 원 '크기'는 아래 screenG(2D 가우시안)가 정하므로, 외곽(비스듬한 표면)에서도
-    //     깊이 단축(foreshortening)에 안 줄고 일정하다.
+    // 이 깊이를 '앞/뒤 선택'에 써서, 실루엣 너머 뒷면이 각거리상 가깝더라도 안 닿게 한다.
     vec3 mDir = normalize(uMouseLocal);
     float mShape = snoise(mDir * SHAPE_FREQ + vec3(uTime * SHAPE_SPEED));
     vec3 mSurf = mDir * (baseRadius * (1.0 + SHAPE_AMP * mShape)) * uIntro;
@@ -241,9 +238,14 @@ const vertexShader = /* glsl */ `
     // (view 공간은 카메라가 -z를 보므로 앞면이 덜 음수, 뒷면이 더 음수)
     const float DEPTH_BAND = 1.0; // 앞면에서 받아들이는 깊이 두께(월드, 반지름≈1)
     float frontSel = smoothstep(-DEPTH_BAND, -0.2 * DEPTH_BAND, mvPosition.z - mouseViewZ);
-    // 화면상 원(일정 크기) × 앞면 선택 × 세기
-    float screenG = exp(-pow(d / max(uMouseRadius, 1e-3), 2.0));
-    float infl = screenG * frontSel * uMouseStrength;
+    // 표면 패치: 화면거리 대신 입자 방향(aBase)과 커서 방향(mDir)의 '구면 각거리'로
+    // falloff → 영향범위가 구 표면에 붙은 둥근 패치처럼 동작한다. 실루엣 쪽으로 갈수록
+    // 각거리가 빨리 벌어져 패치가 납작해지고(원근 단축), 자전·커서이동에 따라 표면을
+    // 훑고 지나가는 3D 느낌이 난다. (uMouseRadius는 이제 화면NDC가 아니라 '라디안' 단위)
+    float ang = acos(clamp(dot(normalize(aBase), mDir), -1.0, 1.0)); // 0=커서 바로 아래 표면점
+    float surfG = exp(-pow(ang / max(uMouseRadius, 1e-3), 2.0));
+    // 구면 패치(표면 부착) × 앞면 선택 × 세기
+    float infl = surfG * frontSel * uMouseStrength;
     vFade = 1.0;
 
   #if MOUSE_MODE == 0
