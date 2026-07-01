@@ -16,4 +16,5 @@ body,
   width: 100%;
   height: 100%;
   overflow: hidden;
+  background: transparent; /* iframe 임베드 시 부모 페이지 배경이 비치도록 */
 }

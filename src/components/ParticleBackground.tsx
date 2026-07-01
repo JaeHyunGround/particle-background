@@ -67,7 +67,7 @@ const wrapperStyle: React.CSSProperties = {
   position: "fixed",
   inset: 0,
   zIndex: -1,
-  background: "#000",
+  background: "transparent", // iframe 임베드 시 부모 페이지 배경이 비치도록 투명
   pointerEvents: "none",
 };
 
@@ -99,6 +99,18 @@ export function ParticleBackground({
   const resolvedCount = count ?? (isTouch ? 120000 : 220000);
   const maxDpr = isTouch ? 1.25 : 1.5;
 
+  // 테마: URL ?theme=light 면 어두운 입자(라이트 페이지용), 아니면 흰 입자(다크 페이지용).
+  // 라이트는 일반 알파 블렌딩(어두운 점이 흰 배경 위에 보임), 다크는 가산 블렌딩(글로우).
+  const theme = useMemo(
+    () => (new URLSearchParams(window.location.search).get("theme") === "light" ? "light" : "dark"),
+    [],
+  );
+  const particleColor = useMemo(
+    () => (theme === "light" ? new THREE.Color(0.11, 0.11, 0.13) : new THREE.Color(1, 1, 1)),
+    [theme],
+  );
+  const additive = theme === "dark";
+
   // window 전역 포인터 리스너: 래퍼가 z-index:-1 / pointer-events:none 이어도
   // 마우스 좌표를 확실히 받기 위해 window에 직접 건다. (좌표 저장만, 연산은 셰이더)
   useEffect(() => {
@@ -128,6 +140,24 @@ export function ParticleBackground({
       window.removeEventListener("blur", onBlur);
     };
   }, [isTouch]);
+
+  // iframe 임베드용: 부모 페이지가 pointer-events:none 로 이 iframe을 덮어도
+  // 자체 pointermove는 발생하지 않는다. 그래서 부모가 postMessage로 넘겨주는
+  // NDC 좌표({ type:'sky-pointer', ndcX, ndcY, active })를 받아 포인터 상태에 반영한다.
+  useEffect(() => {
+    const onMsg = (e: MessageEvent) => {
+      // cross-origin 임베드(스벤/함 등 다른 오리진)에서 좌표를 받으므로 origin 제한 없음.
+      // 페이로드는 포인터 좌표뿐이라 위험이 낮고, type 가드로만 필터한다.
+      const d = e.data;
+      if (!d || d.type !== "sky-pointer") return;
+      if (typeof d.ndcX === "number" && typeof d.ndcY === "number") {
+        pointer.current.ndc.set(d.ndcX, d.ndcY);
+      }
+      pointer.current.active = !!d.active;
+    };
+    window.addEventListener("message", onMsg);
+    return () => window.removeEventListener("message", onMsg);
+  }, []);
 
   // '실제로 보일 때만' 렌더 루프를 돌려 GPU 작업을 아낀다(안 보이면 정지).
   //   - visibilitychange: 탭이 숨겨지면 정지 (iframe도 부모 탭 따라감)
@@ -177,9 +207,8 @@ export function ParticleBackground({
         dpr={[1, maxDpr]}
         frameloop={active ? (fps != null ? "demand" : "always") : "never"}
         camera={{ position: [0, 0, 3], fov: 50 }}
-        gl={{ antialias: true }}
+        gl={{ antialias: true, alpha: true }}
       >
-        <color attach="background" args={["#000000"]} />
         {/* 개발 모드에서만 FPS 오버레이 (프로덕션 빌드 제외). 발열/GPU 전력은 powermetrics로 */}
         {import.meta.env.DEV && <FpsMeter />}
         <ParticleSphere
@@ -192,6 +221,8 @@ export function ParticleBackground({
           sphericity={sphericity}
           mouseRadius={mouseRadius}
           mousePush={mousePush}
+          color={particleColor}
+          additive={additive}
           fps={fps}
           pointer={pointer}
         />

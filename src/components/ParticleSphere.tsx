@@ -42,6 +42,8 @@ export interface ParticleSphereProps {
   sphericity: number; // 구 형태 유지 정도 (1=완벽한 구, 0=자유 curl 구름)
   mouseRadius: number; // 마우스 반발 영향 반경
   mousePush: number; // 마우스 반발 세기
+  color: THREE.Color; // 입자 색 (테마: 다크=흰색, 라이트=어두운 회색)
+  additive: boolean; // 가산 블렌딩(다크 글로우) 여부. false면 일반 알파 블렌딩(라이트)
   pointer: MutableRefObject<PointerState>; // 공유 포인터 상태 ref
   fps?: number; // 렌더 프레임 상한 (설정 시 demand 모드에서 이 주기로 invalidate). 미설정=네이티브
   introDuration?: number; // 등장 연출 길이(초). 기본 1.5
@@ -292,6 +294,7 @@ const vertexShader = /* glsl */ `
 // ────────────────────────────────────────────────────────────────────────────
 const fragmentShader = /* glsl */ `
   uniform float uOpacity; // 등장 연출용 전체 알파 (0→1 페이드인)
+  uniform vec3  uColor;    // 입자 색상 (테마: 다크=흰색, 라이트=어두운 회색)
   varying float vFade;     // 마우스 페이드(투명도) — 1=불투명, 0=완전 투명
 
   void main(){
@@ -302,7 +305,7 @@ const fragmentShader = /* glsl */ `
     alpha *= vFade; // 마우스 페이드(방식 0/2에서 사용; 1에선 항상 1)
     if (alpha < 0.01) discard;
 
-    gl_FragColor = vec4(vec3(1.0), alpha * uOpacity);
+    gl_FragColor = vec4(uColor, alpha * uOpacity);
   }
 `;
 
@@ -320,6 +323,7 @@ const ParticleSphereMaterial = shaderMaterial(
     uSphericity: 1, // 구 형태 유지 정도 (1=완벽한 구)
     uIntro: 0.1, // 등장 연출 시작값 0.1 (10% 크기) → GSAP가 1로 (부풀어오름)
     uOpacity: 0, // 페이드인 시작값 0
+    uColor: new THREE.Color(1, 1, 1), // 입자 색 (기본 흰색; ParticleBackground가 테마별로 갱신)
     uMouseScreen: new THREE.Vector2(0, 0), // 마우스 NDC (매 프레임 추적)
     uMouseLocal: new THREE.Vector3(0, 0, 1), // 커서의 구 표면 3D 좌표(오브젝트 공간) (3D 게이팅)
     uAspect: 1, // 뷰포트 종횡비 (컴포넌트에서 갱신)
@@ -359,6 +363,8 @@ export function ParticleSphere({
   sphericity,
   mouseRadius,
   mousePush,
+  color,
+  additive,
   pointer,
   fps,
   introDuration = 1.5, // 등장 연출 길이(초)
@@ -503,6 +509,7 @@ export function ParticleSphere({
     mat.uniforms.uSphericity.value = sphericity;
     mat.uniforms.uMouseRadius.value = mouseRadius;
     mat.uniforms.uMousePush.value = mousePush;
+    mat.uniforms.uColor.value.copy(color);
 
     const ctx = gsap.context(() => {
       const tl = gsap.timeline();
@@ -535,6 +542,7 @@ export function ParticleSphere({
     sphericity,
     mouseRadius,
     mousePush,
+    color,
     introDuration,
     pixelRatio,
   ]);
@@ -557,7 +565,7 @@ export function ParticleSphere({
         transparent
         depthWrite={false}
         depthTest={false}
-        blending={THREE.AdditiveBlending}
+        blending={additive ? THREE.AdditiveBlending : THREE.NormalBlending}
       />
     </points>
   );
