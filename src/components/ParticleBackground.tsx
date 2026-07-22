@@ -111,6 +111,19 @@ export function ParticleBackground({
   );
   const additive = theme === "dark";
 
+  // 후레시(마우스 스팟라이트) 브랜드 색:
+  //   다크(스카이벤처스) = 파랑 rgba(23, 0, 255, 0.5)
+  //   라이트(함파트너스) = 분홍 rgba(228, 41, 123, 0.9)
+  // rgba의 알파값은 색 섞임 최대 강도(flashMix)로 사용한다.
+  const flashColor = useMemo(
+    () =>
+      theme === "light"
+        ? new THREE.Color(228 / 255, 41 / 255, 123 / 255)
+        : new THREE.Color(23 / 255, 0 / 255, 255 / 255),
+    [theme],
+  );
+  const flashMix = theme === "light" ? 0.9 : 0.5;
+
   // window 전역 포인터 리스너: 래퍼가 z-index:-1 / pointer-events:none 이어도
   // 마우스 좌표를 확실히 받기 위해 window에 직접 건다. (좌표 저장만, 연산은 셰이더)
   useEffect(() => {
@@ -222,6 +235,8 @@ export function ParticleBackground({
           mouseRadius={mouseRadius}
           mousePush={mousePush}
           color={particleColor}
+          flashColor={flashColor}
+          flashMix={flashMix}
           additive={additive}
           fps={fps}
           pointer={pointer}

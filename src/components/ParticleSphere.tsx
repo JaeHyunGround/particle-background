@@ -43,6 +43,8 @@ export interface ParticleSphereProps {
   mouseRadius: number; // 마우스 반발 영향 반경
   mousePush: number; // 마우스 반발 세기
   color: THREE.Color; // 입자 색 (테마: 다크=흰색, 라이트=어두운 회색)
+  flashColor: THREE.Color; // 후레시(스팟라이트) 색 (다크=스벤 파랑, 라이트=함 분홍)
+  flashMix: number; // 후레시 색 섞임 최대 강도 0~1 (브랜드 rgba의 알파값 대응)
   additive: boolean; // 가산 블렌딩(다크 글로우) 여부. false면 일반 알파 블렌딩(라이트)
   pointer: MutableRefObject<PointerState>; // 공유 포인터 상태 ref
   fps?: number; // 렌더 프레임 상한 (설정 시 demand 모드에서 이 주기로 invalidate). 미설정=네이티브
@@ -184,6 +186,7 @@ const vertexShader = /* glsl */ `
   attribute vec3 aBase;       // 각 입자의 기준 위치 (피보나치 구 분포)
 
   varying float vFade;        // 마우스 페이드(투명도) — 프래그먼트로 전달 (1=불투명)
+  varying float vFlash;       // 후레시 세기 — 프래그먼트에서 브랜드 색으로 물들임 (0=영향 없음)
 
   ${glslSimplexNoise}
   ${glslCurlNoise}
@@ -218,8 +221,9 @@ const vertexShader = /* glsl */ `
     displaced *= uIntro;
 
     // ── 마우스 인터랙션 방식 선택 (값 바꾸고 하드 리프레시로 비교) ──
-    //   0 = 부드러운 페이드(투명도)  /  1 = 소용돌이(warp)  /  2 = 부드러운 가장자리 구멍
-    #define MOUSE_MODE 2
+    //   0 = 부드러운 페이드(투명도)  /  1 = 소용돌이(warp)
+    //   2 = 부드러운 가장자리 구멍  /  3 = 후레시(브랜드 색 스팟라이트)
+    #define MOUSE_MODE 3
 
     vec4 mvPosition = modelViewMatrix * vec4(displaced, 1.0);
     vec4 clip = projectionMatrix * mvPosition;
@@ -249,6 +253,7 @@ const vertexShader = /* glsl */ `
     // 구면 패치(표면 부착) × 앞면 선택 × 세기
     float infl = surfG * frontSel * uMouseStrength;
     vFade = 1.0;
+    vFlash = 0.0;
 
   #if MOUSE_MODE == 0
     // [0] 부드러운 페이드: 변위 없음. 커서 근처 입자를 투명하게 → 경계 없는 소프트홀.
@@ -261,6 +266,11 @@ const vertexShader = /* glsl */ `
     sw *= 1.0 - infl * 0.2;                     // 살짝 빨려드는 느낌
     sw.x /= uAspect;
     clip.xy = (uMouseScreen + sw) * clip.w;
+  #elif MOUSE_MODE == 3
+    // [3] 후레시(flashlight): 변위 없음. 커서가 비추는 표면 패치의 입자를
+    //     브랜드 색으로 물들이고 살짝 밝힌다(프래그먼트에서 처리).
+    //     edgeNoise로 빔 가장자리가 딱딱한 원이 아니라 은은하게 일렁이게.
+    vFlash = infl * (1.0 + 0.3 * edgeNoise);
   #else
     // [2] 부드러운 가장자리 구멍: 면적 보존 구멍 + 가장자리 alpha 페더 → 딱딱한 원 완화.
     //     h는 infl(=화면원 × 앞면선택 × 세기)에 비례 → '앞면' 입자만 패임, 뒤쪽 그대로.
@@ -286,6 +296,10 @@ const vertexShader = /* glsl */ `
     // gl_PointSize는 물리 픽셀 단위라 uPixelRatio로 보정해 레티나에서도 동일 크기 유지.
     const float POINT_SCALE = 4.0;
     gl_PointSize = uPointSize * uPixelRatio * (POINT_SCALE / -mvPosition.z);
+  #if MOUSE_MODE == 3
+    // 빛 받은 입자를 살짝 키워 반짝임 강조 (최대 +50%)
+    gl_PointSize *= 1.0 + vFlash * 0.5;
+  #endif
   }
 `;
 
@@ -295,7 +309,10 @@ const vertexShader = /* glsl */ `
 const fragmentShader = /* glsl */ `
   uniform float uOpacity; // 등장 연출용 전체 알파 (0→1 페이드인)
   uniform vec3  uColor;    // 입자 색상 (테마: 다크=흰색, 라이트=어두운 회색)
+  uniform vec3  uFlashColor; // 후레시 색 (다크=스벤 파랑, 라이트=함 분홍)
+  uniform float uFlashMix;   // 후레시 색 섞임 최대 강도 0~1
   varying float vFade;     // 마우스 페이드(투명도) — 1=불투명, 0=완전 투명
+  varying float vFlash;    // 후레시 세기 — 0이면 원래 색 그대로
 
   void main(){
     // 점 중심으로부터의 거리 (0=중심, 0.5=가장자리)
@@ -303,9 +320,16 @@ const fragmentShader = /* glsl */ `
     // 가장자리로 갈수록 알파 감쇠 → 부드러운 원형
     float alpha = smoothstep(0.5, 0.0, dist);
     alpha *= vFade; // 마우스 페이드(방식 0/2에서 사용; 1에선 항상 1)
+
+    // 후레시: 빔 세기에 비례해 브랜드 색으로 물들이고, 알파를 올려
+    // 다크(가산 블렌딩)에선 글로우, 라이트에선 더 진한 스팟이 되게 한다.
+    float f = clamp(vFlash * uFlashMix, 0.0, 1.0);
+    vec3 col = mix(uColor, uFlashColor, f);
+    alpha *= 1.0 + vFlash * 0.6;
+
     if (alpha < 0.01) discard;
 
-    gl_FragColor = vec4(uColor, alpha * uOpacity);
+    gl_FragColor = vec4(col, alpha * uOpacity);
   }
 `;
 
@@ -324,6 +348,8 @@ const ParticleSphereMaterial = shaderMaterial(
     uIntro: 0.1, // 등장 연출 시작값 0.1 (10% 크기) → GSAP가 1로 (부풀어오름)
     uOpacity: 0, // 페이드인 시작값 0
     uColor: new THREE.Color(1, 1, 1), // 입자 색 (기본 흰색; ParticleBackground가 테마별로 갱신)
+    uFlashColor: new THREE.Color(23 / 255, 0 / 255, 255 / 255), // 후레시 색 (기본 스벤 파랑)
+    uFlashMix: 0.5, // 후레시 색 섞임 최대 강도 (테마별로 갱신)
     uMouseScreen: new THREE.Vector2(0, 0), // 마우스 NDC (매 프레임 추적)
     uMouseLocal: new THREE.Vector3(0, 0, 1), // 커서의 구 표면 3D 좌표(오브젝트 공간) (3D 게이팅)
     uAspect: 1, // 뷰포트 종횡비 (컴포넌트에서 갱신)
@@ -364,6 +390,8 @@ export function ParticleSphere({
   mouseRadius,
   mousePush,
   color,
+  flashColor,
+  flashMix,
   additive,
   pointer,
   fps,
@@ -510,6 +538,8 @@ export function ParticleSphere({
     mat.uniforms.uMouseRadius.value = mouseRadius;
     mat.uniforms.uMousePush.value = mousePush;
     mat.uniforms.uColor.value.copy(color);
+    mat.uniforms.uFlashColor.value.copy(flashColor);
+    mat.uniforms.uFlashMix.value = flashMix;
 
     const ctx = gsap.context(() => {
       const tl = gsap.timeline();
@@ -543,6 +573,8 @@ export function ParticleSphere({
     mouseRadius,
     mousePush,
     color,
+    flashColor,
+    flashMix,
     introDuration,
     pixelRatio,
   ]);
